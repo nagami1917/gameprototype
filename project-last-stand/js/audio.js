@@ -209,6 +209,20 @@ export class AudioManager {
     this.blip({ volume: 0.12, type: 'triangle', f0: 900, f1: 600, decay: 0.06 });
   }
 
+  /** Procedural, weapon-specific swing whoosh (no external audio assets). */
+  playMeleeSwing(kind) {
+    if (kind === 'knife') {
+      this.burst({ volume: 0.22, filter: 'highpass', freq: 3200, q: 0.7, decay: 0.12, sweepTo: 900 });
+      return;
+    }
+    if (kind === 'axe') {
+      this.burst({ volume: 0.38, filter: 'lowpass', freq: 850, q: 0.8, decay: 0.24, sweepTo: 180 });
+      this.blip({ volume: 0.16, type: 'triangle', f0: 170, f1: 70, decay: 0.2 });
+      return;
+    }
+    this.burst({ volume: 0.3, filter: 'bandpass', freq: 1500, q: 0.8, decay: 0.18, sweepTo: 450 });
+  }
+
   /** kind: magOut | magIn | shellStart | shell | pump */
   playReload(kind) {
     switch (kind) {

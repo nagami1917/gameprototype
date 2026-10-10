@@ -373,10 +373,31 @@ async function main() {
     assertNear(weapon.computeFalloff(def, 16.5), 0.65, 1e-9, 'midpoint');
   });
 
-  test('rifle has no distance falloff and both weapons have headshot bonuses', () => {
+  test('rifle has no distance falloff and both firearms have headshot bonuses', () => {
     assertEqual(weapon.computeFalloff(weapon.WEAPON_DEFS.rifle, 100), 1, 'rifle falloff');
     assert(weapon.WEAPON_DEFS.rifle.headshotMultiplier > 1, 'rifle headshot multiplier');
     assert(weapon.WEAPON_DEFS.shotgun.headshotMultiplier > 1, 'shotgun headshot multiplier');
+  });
+
+  test('knife, pipe and axe occupy slots 3-5 with distinct melee profiles', () => {
+    assertEqual(weapon.WEAPON_ORDER.join(','), 'rifle,shotgun,knife,pipe,axe', 'stable weapon order');
+    const knife = weapon.WEAPON_DEFS.knife;
+    const pipe = weapon.WEAPON_DEFS.pipe;
+    const axe = weapon.WEAPON_DEFS.axe;
+    assertEqual(knife.category, 'melee', 'knife category');
+    assertEqual(pipe.category, 'melee', 'pipe category');
+    assertEqual(axe.category, 'melee', 'axe category');
+    assertEqual(knife.slot, 3, 'knife slot');
+    assertEqual(pipe.slot, 4, 'pipe slot');
+    assertEqual(axe.slot, 5, 'axe slot');
+    assert(knife.damage < pipe.damage && pipe.damage < axe.damage, 'damage should scale from knife to axe');
+    assert(knife.attackCooldown < pipe.attackCooldown && pipe.attackCooldown < axe.attackCooldown, 'heavy weapons should swing more slowly');
+    assert(pipe.maxTargets > knife.maxTargets, 'pipe should have a wider multi-target sweep');
+    for (const def of [knife, pipe, axe]) {
+      assert(def.reach > 0 && def.arcDegrees > 0 && def.hitTime < def.attackDuration, `${def.id} needs a valid swing profile`);
+      assert(def.magazineSize === undefined && def.startReserve === undefined, `${def.id} must not use ammo`);
+      assert(weapon.AMMO_PICKUP[def.id] === undefined, `${def.id} must not receive ammo pickups`);
+    }
   });
 
   test('weapon magazine and pellet counts match the design', () => {
@@ -385,6 +406,87 @@ async function main() {
     assertEqual(weapon.WEAPON_DEFS.shotgun.pellets, 9, 'shotgun pellets');
     assert(weapon.WEAPON_DEFS.rifle.auto === true, 'rifle should be automatic');
     assert(weapon.WEAPON_DEFS.shotgun.auto === false, 'shotgun should not be automatic');
+  });
+
+  test('melee attacks are unlimited, edge-triggered, and blocked by walls', () => {
+    const previousDocument = globalThis.document;
+    globalThis.document = {
+      createElement() {
+        return {
+          width: 0,
+          height: 0,
+          getContext() {
+            return {
+              createRadialGradient() { return { addColorStop() {} }; },
+              fillRect() {},
+            };
+          },
+        };
+      },
+    };
+    let swings = 0;
+    const hits = [];
+    const audioStub = {
+      playSwitch() {},
+      playMeleeSwing() { swings++; },
+      playDryFire() {},
+      playReload() {},
+      playShot() {},
+      playHitFlesh() {},
+    };
+    const effectsStub = { spawnBlood() {}, spawnImpact() {}, spawnTracer() {} };
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 1.5, 0);
+    camera.lookAt(0, 1.5, -1);
+    camera.updateMatrixWorld(true);
+    const system = new weapon.WeaponSystem({
+      camera,
+      audio: audioStub,
+      effects: effectsStub,
+      player: { addRecoil() {}, addTrauma() {} },
+      hooks: { onEnemyHit: (info) => { hits.push(info); return { killed: false }; } },
+    });
+    const enemy = { isTargetable: () => true };
+    const hitbox = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1, 0.45), new THREE.MeshBasicMaterial());
+    hitbox.position.set(0, 1.5, -1.15);
+    hitbox.userData.enemy = enemy;
+    hitbox.updateMatrixWorld(true);
+    const ctx = {
+      canFire: true,
+      colliders: [createBox(-1, 1, -0.7, 1, 2, -0.6, 'wall')],
+      hitboxes: () => [hitbox],
+      speedFactor: 0,
+      bobPhase: 0,
+    };
+    try {
+      assert(system.addAmmo(), 'firearms should accept their ammo pickup');
+      assertEqual(system.states[0].reserve, 165, 'rifle reserve increased');
+      assertEqual(system.states[1].reserve, 42, 'shotgun reserve increased');
+      assertEqual(system.requestSwitch(2), true, 'select knife');
+      assertEqual(system.startReload(), false, 'melee cannot reload');
+      assertEqual(system.getHudData().ammo, null, 'melee has no fake ammo count');
+
+      system.update(0.4, { firePressed: true, fireHeld: true, reloadPressed: true, aim: true }, ctx);
+      system.update(0.12, { firePressed: false, fireHeld: true }, ctx);
+      assertEqual(hits.length, 0, 'a wall blocks the knife');
+      system.update(0.37, { firePressed: false, fireHeld: true }, ctx);
+      system.update(0.02, { firePressed: false, fireHeld: true }, ctx);
+      ctx.colliders = [];
+      system.update(0.02, { firePressed: true, fireHeld: true }, ctx);
+      system.update(0.12, { firePressed: false, fireHeld: true }, ctx);
+      assertEqual(hits.length, 1, 'a clear knife swing hits once');
+      assertEqual(hits[0].weapon, 'knife', 'melee hit reports its weapon id');
+      assertEqual(hits[0].headshot, false, 'melee hit does not award an unintended headshot');
+      system.update(0.5, { firePressed: false, fireHeld: true }, ctx);
+      assertEqual(hits.length, 1, 'holding fire does not auto-repeat melee');
+      assertEqual(swings, 2, 'each accepted attack plays one swing sound');
+    } finally {
+      system.dispose();
+      hitbox.geometry.dispose();
+      hitbox.material.dispose();
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+    }
   });
 
   /* ---------------- storage ---------------- */

@@ -288,13 +288,25 @@ export class UI {
 
     const w = s.weapon;
     this.diff('weaponName', w.name, (v) => this.setText(this.el['hud-weapon'], v));
-    this.diff('ammo', w.ammo, (v) => this.setText(this.el['hud-ammo'], String(v)));
-    this.diff('reserve', w.reserve, (v) => this.setText(this.el['hud-reserve'], String(v)));
-    const status = w.reloading ? 'RELOADING' : w.switching ? 'DRAWING' : w.ammo === 0 ? 'EMPTY - PRESS R' : '';
-    this.diff('status', status, (v) => {
-      this.setText(this.el['hud-status'], v);
-      this.el['hud-status'].classList.toggle('warn', v !== '');
+    this.diff('hasAmmo', w.hasAmmo, (v) => {
+      this.el['hud-ammo']?.parentElement?.classList.toggle('hidden', !v);
     });
+    if (w.hasAmmo) {
+      this.diff('ammo', w.ammo, (v) => this.setText(this.el['hud-ammo'], String(v)));
+      this.diff('reserve', w.reserve, (v) => this.setText(this.el['hud-reserve'], String(v)));
+    }
+    const status = w.switching
+      ? 'DRAWING'
+      : w.melee
+        ? (w.attacking ? 'SWINGING' : 'NO AMMO REQUIRED')
+        : w.reloading
+          ? 'RELOADING'
+          : w.ammo === 0
+            ? 'EMPTY - PRESS R'
+            : '';
+    const warning = w.hasAmmo && (w.reloading || w.ammo === 0);
+    this.diff('status', status, (v) => this.setText(this.el['hud-status'], v));
+    this.diff('statusWarning', warning, (v) => this.el['hud-status'].classList.toggle('warn', v));
     this.diff('slot', w.slot, (v) => {
       for (const el of this.slotEls) el.classList.toggle('active', Number(el.dataset.slot) === v);
     });

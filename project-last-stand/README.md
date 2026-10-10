@@ -47,12 +47,13 @@ composition, shotgun falloff and LocalStorage handling.
 | --- | --- |
 | W A S D | Move |
 | Mouse | Look (Pointer Lock) |
-| Left click | Fire (rifle is automatic; hold to keep firing) |
-| Right click | Aim down sights |
+| Left click | Fire (hold the automatic rifle); click once per melee swing |
+| Right click | Aim down sights (firearms only) |
 | R | Reload |
 | Shift | Sprint (forward only) |
 | Space | Jump |
 | 1 / 2 | Switch to Assault Rifle / Shotgun |
+| 3 / 4 / 5 | Switch to Field Knife / Steel Pipe / Fire Axe |
 | Esc | Pause and release the mouse |
 
 Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
@@ -62,6 +63,11 @@ Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
 - **Assault Rifle**: medium damage, fully automatic, 30-round magazine.
 - **Shotgun**: nine pellets, high damage at close range, falls off with distance,
   8-round magazine, slow fire, reloads one shell at a time (firing cancels a reload).
+- **Field Knife**: quick, short-range single-target slash; no ammunition required.
+- **Steel Pipe**: wider, two-target sweep with moderate damage and reach.
+- **Fire Axe**: slow, heavy close-range strike with high damage.
+  Melee hits respect walls and doors, can stagger susceptible infected, and inherit
+  the existing armored-enemy damage reduction.
 - **Infected**: Basic (moderate HP and speed), Runner (fast, low HP), Armored (slow,
   high HP, reduces body-shot damage; headshots ignore the armour).
 - **Waves** grow in size and difficulty. Each wave is preceded by a countdown and is
