@@ -167,42 +167,61 @@ export class ParticleSystem {
   }
 }
 
-/** Recycled decals placed on surfaces (bullet holes, blood pools). */
+const _decalZ = new THREE.Vector3(0, 0, 1);
+const _decalN = new THREE.Vector3();
+const _decalQ = new THREE.Quaternion();
+const _decalSpin = new THREE.Quaternion();
+const _decalP = new THREE.Vector3();
+const _decalS = new THREE.Vector3();
+const _decalM = new THREE.Matrix4();
+const _decalHidden = new THREE.Matrix4().makeScale(0, 0, 0);
+
+/**
+ * Recycled decals placed on surfaces (bullet holes, blood pools).
+ * All decals of one pool are a single InstancedMesh, so the pool costs one
+ * draw call instead of one per decal. Unused slots get a zero-scale matrix.
+ */
 class DecalPool {
   constructor(scene, count, material, size) {
     this.scene = scene;
-    this.items = [];
+    this.count = count;
     this.cursor = 0;
     const geo = new THREE.PlaneGeometry(size, size);
-    for (let i = 0; i < count; i++) {
-      const mesh = new THREE.Mesh(geo, material);
-      mesh.visible = false;
-      mesh.renderOrder = 2;
-      scene.add(mesh);
-      this.items.push(mesh);
-    }
+    this.mesh = new THREE.InstancedMesh(geo, material, count);
+    this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.mesh.renderOrder = 2;
+    // Instances are spread over the level, so the mesh's own bounds are not meaningful.
+    this.mesh.frustumCulled = false;
+    for (let i = 0; i < count; i++) this.mesh.setMatrixAt(i, _decalHidden);
+    scene.add(this.mesh);
     this.geo = geo;
   }
 
   /** Places a decal at `point` facing `normal`. */
   place(point, normal, scale = 1, rotation = 0) {
-    const mesh = this.items[this.cursor];
-    this.cursor = (this.cursor + 1) % this.items.length;
-    mesh.position.set(point.x + normal.x * 0.01, point.y + normal.y * 0.01, point.z + normal.z * 0.01);
-    mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), new THREE.Vector3(normal.x, normal.y, normal.z));
-    mesh.rotateZ(rotation);
-    mesh.scale.setScalar(scale);
-    mesh.visible = true;
+    const i = this.cursor;
+    this.cursor = (this.cursor + 1) % this.count;
+    _decalN.set(normal.x, normal.y, normal.z);
+    _decalQ.setFromUnitVectors(_decalZ, _decalN);
+    _decalSpin.setFromAxisAngle(_decalZ, rotation);
+    _decalQ.multiply(_decalSpin); // same as mesh.rotateZ(rotation) after setting the quaternion
+    _decalP.set(point.x + normal.x * 0.01, point.y + normal.y * 0.01, point.z + normal.z * 0.01);
+    _decalS.setScalar(scale);
+    _decalM.compose(_decalP, _decalQ, _decalS);
+    this.mesh.setMatrixAt(i, _decalM);
+    this.mesh.instanceMatrix.needsUpdate = true;
   }
 
   /** Hides every decal (used when a run ends). */
   clear() {
-    for (const m of this.items) m.visible = false;
+    for (let i = 0; i < this.count; i++) this.mesh.setMatrixAt(i, _decalHidden);
+    this.mesh.instanceMatrix.needsUpdate = true;
     this.cursor = 0;
   }
 
   dispose() {
-    for (const m of this.items) this.scene.remove(m);
+    this.scene.remove(this.mesh);
+    this.mesh.dispose();
     this.geo.dispose();
   }
 }
