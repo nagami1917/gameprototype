@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="PROTOCOL: FEEDBACK — a momentum arena shooter. Dash, slide, slam, parry." />
+  <title>PROTOCOL: FEEDBACK</title>
+  <link rel="stylesheet" href="style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/node_modules/three/build/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="view" aria-label="First-person view of the pit"></canvas>
+  <div id="vignette" aria-hidden="true"></div>
+  <div id="dash-flash" aria-hidden="true"></div>
+  <div id="hurt" aria-hidden="true"></div>
+  <div id="flash" aria-hidden="true"></div>
+
+  <div id="hud" class="hud hidden" aria-hidden="true">
+    <div class="hp">
+      <div class="hp-label">HP <b id="hp-num">100 / 100</b></div>
+      <div class="hp-bar"><i id="hp-fill"></i></div>
+      <div id="heal-pop" class="heal-pop"></div>
+    </div>
+
+    <div class="stats">
+      <div>TIME <b id="timer">0:00</b></div>
+      <div>KILLS <b id="kills">0</b></div>
+      <div>PARRY <b id="parries">0</b></div>
+      <div>DODGE <b id="dodges">0</b></div>
+    </div>
+
+    <div id="crosshair" class="crosshair" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+    </div>
+    <div id="charge-meter" class="charge-meter" aria-hidden="true"></div>
+    <div id="hint" class="hint"></div>
+    <button type="button" id="capture-hint" class="capture-hint" hidden>CLICK TO CAPTURE MOUSE</button>
+
+    <div class="style">
+      <div class="style-kicker">STYLE</div>
+      <div class="style-row">
+        <div id="rank" class="style-rank" data-rank="D">D</div>
+        <div id="combo" class="style-combo"></div>
+      </div>
+      <div class="style-bar"><i id="style-fill"></i></div>
+      <ul id="style-log" class="style-log">
+        <li></li><li></li><li></li><li></li>
+      </ul>
+    </div>
+
+    <div class="dash">
+      <div class="dash-label">DASH</div>
+      <div id="dash-segs" class="dash-segs">
+        <div class="seg"><i></i></div>
+        <div class="seg"><i></i></div>
+        <div class="seg"><i></i></div>
+      </div>
+      <div id="wallkicks" class="wallkicks"></div>
+      <div class="speed"><b id="speed">0</b><span>m/s</span></div>
+    </div>
+
+    <div class="weapon">
+      <div id="w-name" class="w-name">PISTOL</div>
+      <div id="w-var" class="w-var">CHARGE</div>
+      <div class="w-ammo-row">
+        <b id="w-ammo">12</b>
+        <div class="w-bar"><i id="w-fill"></i></div>
+      </div>
+      <div id="slots" class="slots">
+        <button type="button" data-slot="0">1 <span>PISTOL</span><b><i></i><i></i><i></i></b></button>
+        <button type="button" data-slot="1">2 <span>SHOTGUN</span><b><i></i><i></i><i></i></b></button>
+        <button type="button" data-slot="2">3 <span>RAIL</span><b><i></i><i></i><i></i></b></button>
+        <button type="button" data-slot="3">4 <span>ROCKET</span><b><i></i><i></i><i></i></b></button>
+        <button type="button" data-slot="4">5 <span>NAIL</span><b><i></i><i></i><i></i></b></button>
+      </div>
+    </div>
+  </div>
+
+  <section id="menu" class="overlay" aria-label="Main menu">
+    <div class="panel">
+      <p class="kicker">KILLBOX // PIT 07</p>
+      <h1>PROTOCOL<span>:</span> FEEDBACK</h1>
+      <p class="lede">Momentum is the health bar you don’t have. Slip, dash, punch their shots back, and don’t repeat yourself.</p>
+      <button type="button" class="go" id="btn-play">ENGAGE</button>
+      <div class="settings">
+        <label>SENS <input id="set-sens" type="range" min="0.3" max="2.5" step="0.05" value="1" /> <output id="out-sens">1.00</output></label>
+        <label>VOL <input id="set-vol" type="range" min="0" max="100" step="1" value="80" /> <output id="out-vol">80%</output></label>
+        <label class="check"><input id="set-invert" type="checkbox" /> INVERT Y</label>
+        <label class="check"><input id="set-shake" type="checkbox" checked /> SHAKE</label>
+      </div>
+      <p class="best">BEST <b id="menu-best">NO RECORD</b></p>
+    </div>
+    <div class="controls">
+      <h2>HANDS</h2>
+      <dl>
+        <div><dt>W A S D</dt><dd>Move. High accel, low friction. No stamina.</dd></div>
+        <div><dt>MOUSE</dt><dd>Look. If capture fails, drift the cursor from center.</dd></div>
+        <div><dt>SPACE</dt><dd>Jump. Against a wall, up to 3 kicks before you touch ground.</dd></div>
+        <div><dt>SHIFT</dt><dd>Dash. 3 charges, 1.5s each, one at a time. Air OK. Brief i-frames.</dd></div>
+        <div><dt>CTRL</dt><dd>Slide on the ground. Slam in the air. Jump keeps slide speed.</dd></div>
+        <div><dt>F / Q</dt><dd>Parry. 0.15s fist. Reflects shots, staggers melee. Refills dash.</dd></div>
+        <div><dt>CLICK</dt><dd>Fire. Hold the charge pistol. No fire during a parry or equip.</dd></div>
+        <div><dt>WHEEL</dt><dd>Next slot, wrapping. Threshold so a trackpad doesn’t skip.</dd></div>
+        <div><dt>1 – 5</dt><dd>Jump to a slot. Press again to cycle its 3 variants.</dd></div>
+        <div><dt>R</dt><dd>Reload. Switching cancels the reload.</dd></div>
+        <div><dt>ESC</dt><dd>Pause. M mutes.</dd></div>
+      </dl>
+      <p class="tip">South overhang is a slide. East wall is a wall-jump. Close damage heals. Style decays when you idle.</p>
+    </div>
+  </section>
+
+  <section id="pause" class="overlay hidden" aria-label="Paused">
+    <div class="panel slim">
+      <p class="kicker">HOLDING</p>
+      <h2>PAUSED</h2>
+      <button type="button" class="go" id="btn-resume">RESUME</button>
+      <button type="button" class="ghost" id="btn-restart">RESTART</button>
+      <button type="button" class="ghost" id="btn-menu">MAIN MENU</button>
+    </div>
+  </section>
+
+  <section id="dead" class="overlay hidden" aria-label="Run over">
+    <div class="panel slim">
+      <p class="kicker">FLATLINE</p>
+      <h2>SIGNAL LOST</h2>
+      <dl class="stats-end">
+        <div><dt>PEAK</dt><dd id="go-rank">D</dd></div>
+        <div><dt>KILLS</dt><dd id="go-kills">0</dd></div>
+        <div><dt>PARRIES</dt><dd id="go-parries">0</dd></div>
+        <div><dt>DODGES</dt><dd id="go-dodges">0</dd></div>
+        <div><dt>TIME</dt><dd id="go-time">0:00</dd></div>
+      </dl>
+      <p class="note" id="go-note">&nbsp;</p>
+      <button type="button" class="go" id="btn-retry">RETRY</button>
+      <button type="button" class="ghost" id="btn-dead-menu">MAIN MENU</button>
+    </div>
+  </section>
+
+  <div id="fatal" class="fatal" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

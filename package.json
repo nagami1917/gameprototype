@@ -6,7 +6,9 @@
   "scripts": {
     "start": "node project-last-stand/server.mjs",
     "dev": "node project-last-stand/server.mjs",
-    "test": "node project-last-stand/tests/run-tests.mjs"
+    "test": "node project-last-stand/tests/run-tests.mjs",
+    "feedback": "node project-feedback/server.mjs",
+    "test:feedback": "node project-feedback/tests/run-tests.mjs"
   },
   "repository": {
     "type": "git",
