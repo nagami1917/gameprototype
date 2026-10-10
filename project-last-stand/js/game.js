@@ -148,6 +148,8 @@ export class Game {
       },
     });
 
+    this.lookTurnSign = 0;
+    this.lookTurnTime = -Infinity;
     this.ai = new EnemyAI();
     this.aiWorld = {
       player: this.player,
@@ -217,6 +219,9 @@ export class Game {
       reveal(m.group);
       if (m.flash) reveal(m.flash);
     }
+    // The arm rig and blade trail are hidden until a melee weapon is drawn.
+    reveal(this.weapons.melee.root);
+    reveal(this.weapons.melee.trail.mesh);
     for (const t of this.effects.tracers) reveal(t.line);
     reveal(this.effects.holes.mesh);
     reveal(this.effects.bloodDecals.mesh);
@@ -592,11 +597,13 @@ export class Game {
     const left = k.isDown('KeyA') || k.isDown('ArrowLeft') ? 1 : 0;
     const sprint = k.isDown('ShiftLeft') || k.isDown('ShiftRight');
     const dashChord = sprint && (k.isDown('KeyA') || k.isDown('KeyS') || k.isDown('KeyD'));
+    // With a melee weapon drawn, Space swings instead of jumping (see updatePlaying).
+    const meleeDrawn = this.weapons.def.category === 'melee';
     return {
       moveZ: fwd - back,
       moveX: right - left,
       sprint,
-      jump: k.isDown('Space') && !dashChord,
+      jump: k.isDown('Space') && !dashChord && !meleeDrawn,
       dash: dashChord && k.wasPressed('Space')
         ? { x: Number(k.isDown('KeyD')) - Number(k.isDown('KeyA')), z: -Number(k.isDown('KeyS')) }
         : null,
@@ -604,11 +611,26 @@ export class Game {
     };
   }
 
+  /**
+   * Swing side for a melee attack: strafing decides it, otherwise the most recent
+   * horizontal look movement. 'left' = backhand, 'right' = forehand.
+   */
+  meleeFacing(controls) {
+    if (controls.moveX < 0) return 'left';
+    if (controls.moveX > 0) return 'right';
+    if (this.time - this.lookTurnTime < 0.4) return this.lookTurnSign < 0 ? 'left' : 'right';
+    return 'right';
+  }
+
   /** Core gameplay step. Only runs while PLAYING. */
   updatePlaying(dt) {
     const input = this.input;
     const look = input.consumeMouseDelta();
     if (input.locked) this.player.look(look.x, look.y);
+    if (Math.abs(look.x) > 2) {
+      this.lookTurnSign = Math.sign(look.x);
+      this.lookTurnTime = this.time;
+    }
     const controls = this.readControls();
     this.player.update(dt, controls, this.level.colliders, this.level.bounds);
 
@@ -644,11 +666,15 @@ export class Game {
         this.weapons.requestSwitch(slot - 1);
       }
     }
+    // Space attacks only with a melee weapon drawn, and never while a dash chord uses it.
+    const meleeDrawn = this.weapons.def.category === 'melee';
     this.weapons.update(
       dt,
       {
         fireHeld: input.mouseDown(0) && input.locked,
         firePressed: input.mouseWasPressed(0) && input.locked,
+        attackPressed: meleeDrawn && input.locked && !controls.dash && input.wasPressed('Space'),
+        facing: this.meleeFacing(controls),
         reloadPressed: input.wasPressed('KeyR'),
         aim: controls.aim,
       },

@@ -489,6 +489,180 @@ async function main() {
     }
   });
 
+  /* ---------------- melee swing animation ---------------- */
+  const meleeAnim = await import(pathToFileURL(path.join(JS_DIR, 'meleeAnim.js')).href);
+  console.log('\nMelee swing');
+
+  /** Runs `fn` with a minimal document stub (the viewmodels create small canvases). */
+  function withDocumentStub(fn) {
+    const previousDocument = globalThis.document;
+    globalThis.document = {
+      createElement() {
+        return {
+          width: 0,
+          height: 0,
+          getContext() {
+            return { createRadialGradient() { return { addColorStop() {} }; }, fillRect() {} };
+          },
+        };
+      },
+    };
+    try {
+      return fn();
+    } finally {
+      if (previousDocument === undefined) delete globalThis.document;
+      else globalThis.document = previousDocument;
+    }
+  }
+
+  function makeMeleeSystem(hitboxes = []) {
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 1.5, 0);
+    camera.lookAt(0, 1.5, -1);
+    camera.updateMatrixWorld(true);
+    const counts = { swings: 0 };
+    const hits = [];
+    const system = new weapon.WeaponSystem({
+      camera,
+      audio: {
+        playSwitch() {}, playDryFire() {}, playReload() {}, playShot() {}, playHitFlesh() {},
+        playMeleeSwing() { counts.swings++; },
+      },
+      effects: { spawnBlood() {}, spawnImpact() {}, spawnTracer() {} },
+      player: { addRecoil() {}, addTrauma() {} },
+      hooks: { onEnemyHit: (info) => { hits.push(info); return { killed: false }; } },
+    });
+    const ctx = { canFire: true, colliders: [], hitboxes: () => hitboxes, speedFactor: 0, bobPhase: 0 };
+    return { camera, system, hits, counts, ctx };
+  }
+
+  function makeTargetHitbox(z = -1.15) {
+    const hitbox = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1, 0.45), new THREE.MeshBasicMaterial());
+    hitbox.position.set(0, 1.5, z);
+    hitbox.userData.enemy = { isTargetable: () => true };
+    hitbox.updateMatrixWorld(true);
+    return hitbox;
+  }
+
+  test('swing timelines are ordered, the hit window sits inside the strike and cooldowns outlast swings', () => {
+    for (const id of ['knife', 'pipe', 'axe']) {
+      const def = weapon.WEAPON_DEFS[id];
+      const tl = meleeAnim.swingTimeline(def);
+      assert(0 < tl.windup && tl.windup < tl.impact && tl.impact < tl.follow && tl.follow < tl.end, `${id} timeline must be ordered`);
+      assertNear(tl.end, def.attackDuration, 1e-9, `${id} timeline ends with the attack`);
+      assert(def.hitTime > tl.windup && def.hitTime + def.activeTime < tl.follow, `${id} hit window must lie inside the strike`);
+      assert(def.attackCooldown > def.attackDuration, `${id} cooldown must outlast the swing`);
+    }
+  });
+
+  test('swing poses start and end at rest, change smoothly and mirror for backhands', () => {
+    const def = weapon.WEAPON_DEFS.knife;
+    const rest = meleeAnim.REST_POSE;
+    const start = meleeAnim.swingPoseAt(def, 0);
+    const end = meleeAnim.swingPoseAt(def, def.attackDuration);
+    for (const k of Object.keys(rest)) {
+      assertNear(start[k], rest[k], 1e-9, `start ${k}`);
+      assertNear(end[k], rest[k], 1e-9, `end ${k}`);
+    }
+    // No jumps: at 240 Hz no joint moves more than a quarter radian (the fast strike peaks near 0.17).
+    let prev = start;
+    for (let t = 1 / 240; t <= def.attackDuration; t += 1 / 240) {
+      const p = meleeAnim.swingPoseAt(def, t);
+      for (const k of Object.keys(rest)) assert(Math.abs(p[k] - prev[k]) < 0.25, `${k} jumps at t=${t.toFixed(3)}`);
+      prev = p;
+    }
+    const tl = meleeAnim.swingTimeline(def);
+    const windup = meleeAnim.swingPoseAt(def, tl.windup);
+    const impact = meleeAnim.swingPoseAt(def, tl.impact);
+    assert(windup.sy < rest.sy && impact.sy > rest.sy, 'forehand winds up on the right and cuts to the left');
+    const backhandWindup = meleeAnim.swingPoseAt(def, tl.windup, 'left');
+    assertNear(backhandWindup.sy - rest.sy, -(windup.sy - rest.sy), 1e-9, 'backhand mirrors shoulder yaw');
+    assertNear(backhandWindup.sr - rest.sr, -(windup.sr - rest.sr), 1e-9, 'backhand mirrors shoulder roll');
+    assertNear(backhandWindup.el, windup.el, 1e-9, 'backhand keeps the elbow bend');
+    assertNear(backhandWindup.sp, windup.sp, 1e-9, 'backhand keeps shoulder pitch');
+  });
+
+  test('the melee weapon is parented to the hand socket and follows the arm through the swing', () => {
+    withDocumentStub(() => {
+      const { camera, system, ctx } = makeMeleeSystem();
+      try {
+        system.requestSwitch(2); // knife
+        const knife = system.models[2].group;
+        assert(knife.parent === system.melee.socket, 'knife must be attached to the hand socket');
+        assert(system.models[0].group.parent === camera, 'firearms stay on the camera');
+        assert(system.melee.root.visible && !system.models[0].group.visible, 'arm shows for melee, rifle hidden');
+        system.update(0.5, {}, ctx); // finish the draw
+        system.update(0.001, { firePressed: true }, ctx);
+        assert(system.state.attacking, 'swing started');
+        const grip = new THREE.Vector3();
+        const hand = new THREE.Vector3();
+        for (let i = 0; i < 40; i++) {
+          system.update(1 / 60, {}, ctx);
+          camera.updateMatrixWorld(true);
+          knife.getWorldPosition(grip);
+          system.melee.socket.getWorldPosition(hand);
+          assert(grip.distanceTo(hand) < 1e-6, `grip must stay on the hand (frame ${i})`);
+        }
+        assert(!system.state.attacking, 'swing ends after its duration');
+        system.requestSwitch(0); // back to the rifle: arm hidden, rifle back on the camera
+        assert(!system.melee.root.visible, 'arm hidden for firearms');
+        assert(system.models[0].group.parent === camera, 'rifle re-attached to the camera');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('a melee swing damages each enemy at most once, only during its active window', () => {
+    withDocumentStub(() => {
+      const hitbox = makeTargetHitbox();
+      const { system, hits, ctx } = makeMeleeSystem([hitbox]);
+      try {
+        system.requestSwitch(3); // steel pipe: two-target sweep, so only the struck set prevents repeats
+        system.update(0.5, {}, ctx);
+        system.update(0.001, { firePressed: true }, ctx);
+        const def = weapon.WEAPON_DEFS.pipe;
+        let t = 0.001;
+        while (t < def.hitTime - 0.02) { system.update(0.02, {}, ctx); t += 0.02; }
+        assertEqual(hits.length, 0, 'no hit before the active window opens');
+        for (let i = 0; i < 40; i++) system.update(0.01, {}, ctx);
+        assertEqual(hits.length, 1, 'one enemy is hit once across the whole active window');
+        assertEqual(hits[0].weapon, 'pipe', 'hit reports the pipe');
+      } finally {
+        system.dispose();
+        hitbox.geometry.dispose();
+        hitbox.material.dispose();
+      }
+    });
+  });
+
+  test('swings never overlap, respect the cooldown and honour the facing side', () => {
+    withDocumentStub(() => {
+      const { system, counts, ctx } = makeMeleeSystem();
+      try {
+        system.requestSwitch(2); // knife
+        system.update(0.5, {}, ctx);
+        system.update(0.001, { firePressed: true }, ctx);
+        assertEqual(system.state.attackFacing, 'right', 'default swing is a forehand');
+        system.update(0.1, { firePressed: true, attackPressed: true }, ctx);
+        assertEqual(counts.swings, 1, 'a second press mid-swing does not start another swing');
+        system.update(0.35, {}, ctx); // the first swing has ended, but the cooldown is still running
+        assert(!system.state.attacking, 'first swing ended');
+        system.update(0.01, { attackPressed: true }, ctx);
+        assertEqual(counts.swings, 1, 'attacks are blocked during the cooldown');
+        system.update(0.2, {}, ctx); // cooldown (0.48 s) is now over
+        system.update(0.001, { attackPressed: true }, ctx);
+        assertEqual(counts.swings, 2, 'a new swing starts once the cooldown has finished');
+        assertEqual(system.state.attackFacing, 'right', 'Space swing uses the forehand by default');
+        system.update(0.6, {}, ctx);
+        system.tryMeleeAttack('left');
+        assertEqual(system.state.attackFacing, 'left', 'left facing starts a backhand');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
   /* ---------------- storage ---------------- */
   const storage = await import(pathToFileURL(path.join(JS_DIR, 'storage.js')).href);
   console.log('\nStorage');

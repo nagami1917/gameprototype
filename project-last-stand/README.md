@@ -47,13 +47,17 @@ composition, shotgun falloff and LocalStorage handling.
 | --- | --- |
 | W A S D | Move |
 | Mouse | Look (Pointer Lock) |
-| Left click | Fire (hold the automatic rifle); click once per melee swing |
+| Left click | Fire (hold the automatic rifle); one swing per click with a melee weapon |
 | Right click | Aim down sights (firearms only) |
 | R | Reload |
 | Shift | Sprint (forward only) |
-| Space | Jump |
+| Space | Jump; with a melee weapon drawn, swing instead (no jump) |
 | 1 / 2 | Switch to Assault Rifle / Shotgun |
 | 3 / 4 / 5 | Switch to Field Knife / Steel Pipe / Fire Axe |
+
+Melee swings: hold A or D while attacking (or flick the mouse) for a backhand or
+forehand swing. Each swing has a wind-up, a strike and a recovery, and hits each enemy
+at most once.
 | Esc | Pause and release the mouse |
 
 Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
@@ -89,7 +93,8 @@ project-last-stand/
 │   ├── main.js         entry point and menu wiring
 │   ├── game.js         state machine, systems and rules
 │   ├── player.js       movement, health, camera
-│   ├── weapon.js       weapons, hitscan, viewmodels
+│   ├── weapon.js       weapons, hitscan, melee state machine, viewmodels
+│   ├── meleeAnim.js    melee arm rig, swing poses and easing, blade trail
 │   ├── enemy.js        enemy types, states, visuals
 │   ├── enemyAI.js      perception, A* nav grid, behaviour
 │   ├── level.js        map layout, geometry, doors, lights, pickups
