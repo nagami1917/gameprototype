@@ -19,7 +19,7 @@ import * as THREE from 'three';
 import { Level } from './level.js';
 import { Player } from './player.js';
 import { WeaponSystem } from './weapon.js';
-import { Enemy } from './enemy.js';
+import { Enemy, warmEnemyVisuals } from './enemy.js';
 import { EnemyAI } from './enemyAI.js';
 import { WaveManager } from './waveManager.js';
 import { EffectsManager } from './effects.js';
@@ -181,6 +181,7 @@ export class Game {
     this.applySettings();
     this.resetPlayerToStart();
     this.weapons.reset();
+    this.prewarmShaders();
     this.ui.writeSettingsControls(this.settings);
     this.ui.setRecords(this.storageData);
     this.setState(STATE.MENU);
@@ -188,6 +189,39 @@ export class Game {
     this.audio.setAmbienceLevel(0.5);
     this.lastFrame = performance.now();
     this.raf = requestAnimationFrame(this.frame);
+  }
+
+  /**
+   * Compiles every shader program the game can use, while the title screen loads.
+   * Without this, the first wave, first shot, first blood decal or the first
+   * time shadows are toggled would stall a frame while the driver compiles the
+   * program. Normally hidden objects (viewmodels, decals, tracers, enemies) are
+   * made visible for the duration of the compile, then restored. Only the active
+   * shadow setting is compiled: compiling the other variant as well doubles the
+   * start-up compile for a setting that is rarely changed (toggling it compiles once).
+   */
+  prewarmShaders() {
+    const hidden = [];
+    const reveal = (o) => {
+      if (!o.visible) {
+        hidden.push(o);
+        o.visible = true;
+      }
+    };
+    for (const m of this.weapons.models) {
+      reveal(m.group);
+      reveal(m.flash);
+    }
+    for (const t of this.effects.tracers) reveal(t.line);
+    reveal(this.effects.holes.mesh);
+    reveal(this.effects.bloodDecals.mesh);
+    const removeEnemies = warmEnemyVisuals(this.scene);
+    try {
+      this.renderer.compile(this.scene, this.camera);
+    } finally {
+      removeEnemies();
+      for (const o of hidden) o.visible = false;
+    }
   }
 
   /* ------------------------------------------------------------------ *
