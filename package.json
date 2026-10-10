@@ -1,0 +1,22 @@
+{
+  "name": "gameprototype",
+  "version": "1.0.0",
+  "description": "Game prototype - PROJECT: LAST STAND",
+  "private": true,
+  "scripts": {
+    "start": "node project-last-stand/server.mjs",
+    "dev": "node project-last-stand/server.mjs",
+    "test": "node project-last-stand/tests/run-tests.mjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/nagami1917/gameprototype.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/nagami1917/gameprototype/issues"
+  },
+  "homepage": "https://github.com/nagami1917/gameprototype#readme"
+}
