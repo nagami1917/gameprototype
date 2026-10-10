@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { raycastBoxes } from './collision.js';
 import { createGlowTexture } from './textures.js';
 import { mergeMeshesByMaterial } from './level.js';
+import { MeleeViewmodel, swingTimeline } from './meleeAnim.js';
 
 export const WEAPON_DEFS = {
   rifle: {
@@ -86,6 +87,13 @@ export const WEAPON_DEFS = {
     attackDuration: 0.42,
     attackCooldown: 0.48,
     switchTime: 0.36,
+    // Animation timing (seconds): wind-up ends, strike ends, active hit window =
+    // [hitTime, hitTime + activeTime]. The blade reaches its impact pose mid-window.
+    swing: 'slash',
+    windup: 0.07,
+    strikeEnd: 0.22,
+    activeTime: 0.08,
+    trailColor: 0xbfe6ff,
   },
   pipe: {
     id: 'pipe',
@@ -101,6 +109,11 @@ export const WEAPON_DEFS = {
     attackDuration: 0.62,
     attackCooldown: 0.72,
     switchTime: 0.4,
+    swing: 'slash',
+    windup: 0.14,
+    strikeEnd: 0.4,
+    activeTime: 0.16,
+    trailColor: 0xffe0a0,
   },
   axe: {
     id: 'axe',
@@ -116,6 +129,11 @@ export const WEAPON_DEFS = {
     attackDuration: 0.94,
     attackCooldown: 1.08,
     switchTime: 0.48,
+    swing: 'chop',
+    windup: 0.22,
+    strikeEnd: 0.56,
+    activeTime: 0.2,
+    trailColor: 0xffa860,
   },
 };
 
@@ -140,6 +158,8 @@ class WeaponState {
     this.attacking = false;
     this.attackTimer = 0;
     this.attackHit = false;
+    this.attackFacing = 'right';
+    this.struck = new Set(); // enemies already hit by the current swing
   }
 }
 
@@ -234,7 +254,12 @@ function buildKnifeModel() {
   group.add(pommel);
 
   mergeMeshesByMaterial(group);
-  return { group };
+  return {
+    group,
+    // The knife grip is centred on the group origin, which is the hand socket.
+    grip: new THREE.Vector3(0, 0, 0),
+    trail: { base: new THREE.Vector3(0, 0.035, -0.02), tip: new THREE.Vector3(0, 0.035, -0.27) },
+  };
 }
 
 function buildPipeModel() {
@@ -261,7 +286,11 @@ function buildPipeModel() {
   group.add(band);
 
   mergeMeshesByMaterial(group);
-  return { group };
+  return {
+    group,
+    grip: new THREE.Vector3(0, 0, 0.13),
+    trail: { base: new THREE.Vector3(0, 0, -0.02), tip: new THREE.Vector3(0, 0, -0.32) },
+  };
 }
 
 function buildAxeModel() {
@@ -289,7 +318,11 @@ function buildAxeModel() {
   group.add(warningStripe);
 
   mergeMeshesByMaterial(group);
-  return { group };
+  return {
+    group,
+    grip: new THREE.Vector3(0.015, -0.01, 0.19),
+    trail: { base: new THREE.Vector3(0.03, 0.035, -0.215), tip: new THREE.Vector3(-0.21, 0.035, -0.215) },
+  };
 }
 
 /**
@@ -336,10 +369,12 @@ export class WeaponSystem {
       buildPipeModel(),
       buildAxeModel(),
     ];
+    // Melee weapons are held by the first-person arm rig; firearms stay on the camera.
+    this.melee = new MeleeViewmodel(camera);
+    this.viewmodelVisible = true;
     for (const m of this.models) {
       m.group.visible = false;
       m.group.position.set(0.24, -0.24, -0.42);
-      camera.add(m.group);
       if (!m.muzzle) continue; // Only firearms have muzzle-flash sprites.
       const flashMat = new THREE.SpriteMaterial({
         map: createGlowTexture('#ffb347'),
@@ -354,7 +389,8 @@ export class WeaponSystem {
       m.flash.position.set(0, 0, -0.04);
       m.muzzle.add(m.flash);
     }
-    this.models[this.index].group.visible = true;
+    this.models.forEach((_, i) => this.attachModel(i));
+    this.syncVisibility();
 
     this.raycaster = new THREE.Raycaster();
     this.raycaster.near = 0;
@@ -384,13 +420,40 @@ export class WeaponSystem {
     this.aimAmount = 0;
     this.viewKick = 0;
     this.flashTimer = 0;
-    this.models.forEach((m, i) => {
-      m.group.visible = i === 0;
+    this.melee.reset();
+    this.viewmodelVisible = true;
+    this.models.forEach((m) => {
       if (m.flash) {
         m.flash.visible = false;
         m.flash.material.opacity = 0;
       }
     });
+    this.models.forEach((_, i) => this.attachModel(i));
+    this.syncVisibility();
+  }
+
+  /**
+   * Parents a viewmodel to the right place: melee weapons go to the hand socket
+   * of the arm rig (so they cannot detach from the hand), firearms to the camera.
+   */
+  attachModel(index) {
+    const m = this.models[index];
+    const def = this.states[index].def;
+    if (def.category === 'melee') {
+      this.melee.socket.add(m.group);
+      m.group.position.copy(m.grip).negate(); // the grip point sits on the hand socket
+      m.group.rotation.set(0, 0, 0);
+    } else {
+      this.camera.add(m.group);
+      m.group.position.set(0.24, -0.24, -0.42);
+    }
+  }
+
+  /** Shows the current weapon (and the arm, for melee) only while the viewmodel is visible. */
+  syncVisibility() {
+    const visible = this.viewmodelVisible;
+    this.models.forEach((m, i) => (m.group.visible = visible && i === this.index));
+    this.melee.setVisible(visible && this.def.category === 'melee');
   }
 
   /** Switches by slot index; firearms keep slots 1-2 and melee uses slots 3-5. */
@@ -401,10 +464,12 @@ export class WeaponSystem {
     old.attacking = false;
     old.attackTimer = 0;
     old.attackHit = false;
+    old.struck.clear();
     this.flashTimer = 0;
-    this.models[this.index].group.visible = false;
+    this.melee.reset();
     this.index = index;
-    this.models[index].group.visible = true;
+    this.attachModel(index);
+    this.syncVisibility();
     this.switchTimer = this.def.switchTime;
     this.audio.playSwitch();
     this.hooks.onSwitch?.(this.def);
@@ -460,7 +525,8 @@ export class WeaponSystem {
 
   /** Shows or hides the viewmodel (hidden in menus and after death). */
   setVisible(visible) {
-    this.models.forEach((m, i) => (m.group.visible = visible && i === this.index));
+    this.viewmodelVisible = visible;
+    this.syncVisibility();
   }
 
   /** Releases procedural viewmodel GPU resources when the game is disposed. */
@@ -468,8 +534,9 @@ export class WeaponSystem {
     const geometries = new Set();
     const materials = new Set();
     const textures = new Set();
+    this.melee.dispose();
     for (const model of this.models) {
-      this.camera.remove(model.group);
+      model.group.removeFromParent();
       model.group.traverse((object) => {
         if (object.geometry) geometries.add(object.geometry);
         if (!object.material) return;
@@ -525,50 +592,112 @@ export class WeaponSystem {
     }
 
     if (isMelee) {
-      if (!ctx.canFire) {
-        st.attacking = false;
-        st.attackTimer = 0;
-        st.attackHit = false;
-      } else {
-        if (st.attacking) {
-          st.attackTimer = Math.min(st.def.attackDuration, st.attackTimer + dt);
-          if (!st.attackHit && st.attackTimer >= st.def.hitTime) {
-            st.attackHit = true;
-            this.resolveMeleeAttack(st.def, ctx);
-          }
-          if (st.attackTimer >= st.def.attackDuration) {
-            st.attacking = false;
-            st.attackTimer = 0;
-            st.attackHit = false;
-          }
-        }
-        // Melee is edge-triggered: holding the mouse never repeats a swing.
-        if (input.firePressed) this.tryMeleeAttack();
-      }
+      this.updateMelee(dt, input, ctx);
     } else if (ctx.canFire) {
       if (input.reloadPressed) this.startReload();
       const wantsFire = st.def.auto ? input.fireHeld : input.firePressed;
       if (wantsFire) this.tryFire(ctx);
     }
 
-    this.updateViewmodel(ctx);
+    if (isMelee) this.updateMeleeViewmodel(dt, ctx);
+    else this.updateViewmodel(ctx);
     this.updateMuzzleFlash();
   }
 
-  /** Starts one melee swing; damage is applied once on its animated hit frame. */
-  tryMeleeAttack() {
+  /**
+   * Melee state machine: one swing at a time, edge-triggered, with a cooldown.
+   * Inputs: firePressed (left mouse) or attackPressed (Space) start a swing.
+   */
+  updateMelee(dt, input, ctx) {
+    if (!ctx.canFire) {
+      this.cancelMeleeAttack();
+      return;
+    }
+    if (this.state.attacking) this.advanceMeleeAttack(dt, ctx);
+    // Holding the button or Space never repeats a swing.
+    if (input.firePressed || input.attackPressed) this.tryMeleeAttack(input.facing);
+  }
+
+  /** Moves the swing timer forward, runs hit detection in the active window and ends the swing. */
+  advanceMeleeAttack(dt, ctx) {
+    const st = this.state;
+    const def = st.def;
+    const tl = swingTimeline(def);
+    const prev = st.attackTimer;
+    const next = Math.min(tl.end, prev + dt);
+    st.attackTimer = next;
+
+    // Lunge: the camera dips a touch as the strike begins.
+    if (prev < tl.windup && next >= tl.windup) this.player.addRecoil(-0.012, 0);
+
+    // The blade is only dangerous during its active window. Each frame that overlaps the
+    // window sweeps again, but an enemy already in st.struck is never hit twice in one swing.
+    const winStart = def.hitTime;
+    const winEnd = def.hitTime + def.activeTime;
+    if (next >= winStart && prev < winEnd) {
+      const before = st.struck.size;
+      this.resolveMeleeAttack(def, ctx, st.struck);
+      if (st.struck.size > before) {
+        st.attackHit = true;
+        this.melee.onImpact();
+        this.player.addRecoil(-0.02, 0);
+        this.player.addTrauma(0.12);
+      }
+    }
+
+    if (next >= tl.end) this.endMeleeAttack();
+  }
+
+  endMeleeAttack() {
+    const st = this.state;
+    st.attacking = false;
+    st.attackTimer = 0;
+    st.attackHit = false;
+    st.struck.clear();
+  }
+
+  cancelMeleeAttack() {
+    this.endMeleeAttack();
+    this.melee.reset();
+  }
+
+  /** Viewmodel update for the arm rig: pose, body recoil and blade trail. */
+  updateMeleeViewmodel(dt, ctx) {
+    const st = this.state;
+    this.melee.update(dt, {
+      def: st.def,
+      attacking: st.attacking,
+      timer: st.attackTimer,
+      facing: st.attackFacing,
+      weapon: this.models[this.index],
+      bobPhase: ctx.bobPhase,
+      speedFactor: ctx.speedFactor,
+      switchT: this.switchTimer > 0 ? this.switchTimer / st.def.switchTime : 0,
+    });
+  }
+
+  /**
+   * Starts one melee swing. `facing` picks the swing side: 'right' is a forehand
+   * (wind-up on the right, cut to the left), 'left' is a backhand (mirrored).
+   */
+  tryMeleeAttack(facing = 'right') {
     const st = this.state;
     if (st.def.category !== 'melee' || this.switchTimer > 0 || st.cooldown > 0 || st.attacking) return false;
     st.attacking = true;
     st.attackTimer = 0;
     st.attackHit = false;
+    st.attackFacing = facing === 'left' ? 'left' : 'right';
+    st.struck.clear();
     st.cooldown = st.def.attackCooldown;
     this.audio.playMeleeSwing(st.def.id);
     return true;
   }
 
-  /** Applies a short forward fan of melee rays, stopped by the first world collider. */
-  resolveMeleeAttack(def, ctx) {
+  /**
+   * Applies a short forward fan of melee rays, stopped by the first world collider.
+   * Enemies already in `struck` are skipped, so one swing never hits the same enemy twice.
+   */
+  resolveMeleeAttack(def, ctx, struck) {
     const hitboxes = ctx.hitboxes();
     if (hitboxes.length === 0) return;
 
@@ -581,10 +710,9 @@ export class WeaponSystem {
     originData.y = origin.y;
     originData.z = origin.z;
 
-    const seen = new Set();
     const arc = THREE.MathUtils.degToRad(def.arcDegrees);
     const count = Math.max(1, def.rayCount);
-    for (let i = 0; i < count && seen.size < def.maxTargets; i++) {
+    for (let i = 0; i < count && struck.size < def.maxTargets; i++) {
       const angle = count === 1 ? 0 : (i / (count - 1) - 0.5) * arc;
       const c = Math.cos(angle);
       const s = Math.sin(angle);
@@ -607,8 +735,8 @@ export class WeaponSystem {
       const hits = this.raycaster.intersectObjects(hitboxes, false);
       for (const hit of hits) {
         const enemy = hit.object.userData.enemy;
-        if (!enemy || !enemy.isTargetable() || seen.has(enemy)) continue;
-        seen.add(enemy);
+        if (!enemy || !enemy.isTargetable() || struck.has(enemy)) continue;
+        struck.add(enemy);
         const point = hit.point.clone();
         const normal = { x: -dir.x, y: -dir.y, z: -dir.z };
         const outcome = this.hooks.onEnemyHit?.({
@@ -622,7 +750,7 @@ export class WeaponSystem {
         this.effects.spawnBlood(point, normal, 1.1);
         this.audio.playHitFlesh(false);
         if (outcome?.killed) this.effects.spawnBlood(point, normal, 2);
-        break; // One target per ray; `seen` also prevents multi-ray double hits.
+        break; // One target per ray; `struck` also prevents multi-ray double hits.
       }
     }
   }
@@ -808,31 +936,8 @@ export class WeaponSystem {
     const bob = Math.sin(ctx.bobPhase || 0) * 0.012 * (ctx.speedFactor || 0);
     const g = model.group;
 
-    if (st.def.category === 'melee') {
-      const phase = st.attacking ? Math.min(1, st.attackTimer / st.def.attackDuration) : 0;
-      const swing = st.attacking ? Math.sin(Math.PI * phase) : 0;
-      const dip = switchT * 0.35;
-      g.position.x = 0.28 + bob * 0.5;
-      g.position.y = -0.24 - dip + Math.abs(bob);
-      g.position.z = -0.4 + swing * (st.def.id === 'axe' ? 0.04 : 0.025);
-
-      if (st.def.id === 'knife') {
-        g.rotation.x = -0.2 - swing * 0.7 + switchT * 0.45;
-        g.rotation.y = 0.12 - swing * 0.35;
-        g.rotation.z = 0.22 + swing * 1.05 - bob * 2;
-      } else if (st.def.id === 'pipe') {
-        g.rotation.x = -0.1 - swing * 0.35 + switchT * 0.45;
-        g.rotation.y = swing * 0.15;
-        g.rotation.z = -0.12 - swing * 1.2 - bob * 2;
-      } else {
-        // A heavier overhead chop, with a longer wind-up and follow-through.
-        g.rotation.x = -0.28 - swing * 1.25 + switchT * 0.45;
-        g.rotation.y = -0.08 + swing * 0.2;
-        g.rotation.z = 0.16 + swing * 0.4 - bob * 2;
-        g.position.y -= swing * 0.07;
-      }
-      return;
-    }
+    // Melee viewmodels are posed by the arm rig (meleeAnim.js), not here.
+    if (st.def.category === 'melee') return;
 
     const aim = this.aimAmount;
     const reloadPhase = st.reloading ? 1 - st.reloadTimer / st.def.reloadTime : 0;
