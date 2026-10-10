@@ -28,6 +28,7 @@ import {
   createScreenTexture,
   createWarningSignTexture,
   createGlowTexture,
+  createScreenAtlas,
 } from './textures.js';
 
 export const CELL_SIZE = 2;
@@ -335,6 +336,104 @@ class BoxBatch {
   }
 }
 
+/**
+ * Merges indexed geometries (box, plane, cylinder, sphere) into one BufferGeometry.
+ * Each part is transformed by its matrix; positions, normals and uvs are kept.
+ * @param {Array<{geometry: THREE.BufferGeometry, matrix: THREE.Matrix4}>} parts
+ * @returns {{geometry: THREE.BufferGeometry, offsets: number[]}}  offsets[i] = first vertex of part i
+ */
+export function mergeGeometries(parts) {
+  let vCount = 0;
+  let iCount = 0;
+  for (const { geometry } of parts) {
+    const n = geometry.attributes.position.count;
+    vCount += n;
+    iCount += geometry.index ? geometry.index.count : n;
+  }
+  const pos = new Float32Array(vCount * 3);
+  const nor = new Float32Array(vCount * 3);
+  const uv = new Float32Array(vCount * 2);
+  const idx = vCount > 65535 ? new Uint32Array(iCount) : new Uint16Array(iCount);
+  const offsets = [];
+  const p = new THREE.Vector3();
+  const n = new THREE.Vector3();
+  const normalMatrix = new THREE.Matrix3();
+  let v = 0;
+  let k2 = 0;
+  for (const { geometry, matrix } of parts) {
+    const src = geometry.attributes;
+    const count = src.position.count;
+    offsets.push(v);
+    normalMatrix.getNormalMatrix(matrix);
+    for (let k = 0; k < count; k++) {
+      p.fromBufferAttribute(src.position, k).applyMatrix4(matrix);
+      pos[(v + k) * 3] = p.x;
+      pos[(v + k) * 3 + 1] = p.y;
+      pos[(v + k) * 3 + 2] = p.z;
+      n.fromBufferAttribute(src.normal, k).applyNormalMatrix(normalMatrix).normalize();
+      nor[(v + k) * 3] = n.x;
+      nor[(v + k) * 3 + 1] = n.y;
+      nor[(v + k) * 3 + 2] = n.z;
+      uv[(v + k) * 2] = src.uv.getX(k);
+      uv[(v + k) * 2 + 1] = src.uv.getY(k);
+    }
+    if (geometry.index) {
+      for (let k = 0; k < geometry.index.count; k++) idx[k2++] = geometry.index.getX(k) + v;
+    } else {
+      for (let k = 0; k < count; k++) idx[k2++] = v + k;
+    }
+    v += count;
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+  geo.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  geo.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
+  geo.setIndex(new THREE.BufferAttribute(idx, 1));
+  geo.computeBoundingSphere();
+  geo.computeBoundingBox();
+  return { geometry: geo, offsets };
+}
+
+/**
+ * Replaces the separate meshes inside `group` that share a material with one
+ * merged mesh per material. Mesh transforms are baked into the geometry, so the
+ * group itself can still be animated as a whole. Used for the viewmodels.
+ */
+export function mergeMeshesByMaterial(group) {
+  const byMaterial = new Map();
+  for (const child of group.children) {
+    if (!child.isMesh) continue;
+    child.updateMatrix();
+    if (!byMaterial.has(child.material)) byMaterial.set(child.material, []);
+    byMaterial.get(child.material).push(child);
+  }
+  for (const [material, meshes] of byMaterial) {
+    if (meshes.length < 2) continue;
+    const { geometry } = mergeGeometries(meshes.map((m) => ({ geometry: m.geometry, matrix: m.matrix })));
+    for (const m of meshes) {
+      group.remove(m);
+      m.geometry.dispose();
+    }
+    group.add(new THREE.Mesh(geometry, material));
+  }
+}
+
+/** Maps a unit plane's uvs onto one row of a texture atlas (row 0 is the top row). */
+function remapUvToAtlasRow(geometry, row, rows) {
+  const uv = geometry.attributes.uv;
+  const v1 = 1 - row / rows;
+  const v0 = 1 - (row + 1) / rows;
+  for (let k = 0; k < uv.count; k++) uv.setY(k, v0 + uv.getY(k) * (v1 - v0));
+  uv.needsUpdate = true;
+}
+
+/** Translation (and optional Y rotation) helper for merge matrices. */
+function placeMatrix(x, y, z, rotY = 0) {
+  const m = new THREE.Matrix4().makeRotationY(rotY);
+  m.setPosition(x, y, z);
+  return m;
+}
+
 /* ------------------------------------------------------------------ *
  * Pickups: health packs and ammo boxes that respawn during supply breaks.
  * ------------------------------------------------------------------ */
@@ -350,12 +449,13 @@ export class PickupSystem {
       new THREE.BoxGeometry(0.5, 0.36, 0.42),
       new THREE.MeshStandardMaterial({ color: 0xe8ecef, roughness: 0.5, metalness: 0.1 }),
     );
+    // The red cross is two bars with one material: merged into a single mesh.
     const crossMat = new THREE.MeshStandardMaterial({ color: 0xff3030, emissive: 0xaa0000, emissiveIntensity: 0.8 });
-    const crossV = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.02, 0.26), crossMat);
-    const crossH = new THREE.Mesh(new THREE.BoxGeometry(0.26, 0.02, 0.08), crossMat);
-    crossV.position.y = 0.19;
-    crossH.position.y = 0.19;
-    healthGroup.add(base, crossV, crossH);
+    const cross = new THREE.Mesh(mergeGeometries([
+      { geometry: new THREE.BoxGeometry(0.08, 0.02, 0.26), matrix: placeMatrix(0, 0.19, 0) },
+      { geometry: new THREE.BoxGeometry(0.26, 0.02, 0.08), matrix: placeMatrix(0, 0.19, 0) },
+    ]).geometry, crossMat);
+    healthGroup.add(base, cross);
 
     const ammoGroup = new THREE.Group();
     const crate = new THREE.Mesh(
@@ -579,23 +679,29 @@ export class Level {
       }
     }
 
-    // Consoles: body + emissive screen on the front face.
-    for (const k of consoles) {
-      const body = new THREE.Group();
+    // Consoles: all bodies share one material and one merged mesh; the emissive
+    // screens on their front faces are rows of one texture atlas (one draw call).
+    if (consoles.length > 0) {
+      const bodyParts = [];
+      const screenParts = [];
+      consoles.forEach((k, i) => {
+        const place = placeMatrix(k.x, 0, k.z, k.rot);
+        bodyParts.push({
+          geometry: new THREE.BoxGeometry(1.4, 1.3, 0.6),
+          matrix: place.clone().multiply(new THREE.Matrix4().makeTranslation(0, 0.65, 0)),
+        });
+        const screenGeo = new THREE.PlaneGeometry(1.1, 0.7);
+        remapUvToAtlasRow(screenGeo, i, consoles.length);
+        screenParts.push({
+          geometry: screenGeo,
+          matrix: place.clone().multiply(new THREE.Matrix4().makeTranslation(0, 0.9, 0.305)),
+        });
+      });
       const bodyMat = this.track(new THREE.MeshStandardMaterial({ color: 0x2b323b, roughness: 0.55, metalness: 0.4 }));
-      const boxGeo = new THREE.BoxGeometry(1.4, 1.3, 0.6);
-      const mesh = new THREE.Mesh(boxGeo, bodyMat);
-      mesh.position.y = 0.65;
-      mesh.castShadow = true;
-      mesh.receiveShadow = true;
-      body.add(mesh);
-      const screenMat = this.track(new THREE.MeshBasicMaterial({ map: this.track(createScreenTexture(k.seed)), toneMapped: false }));
-      const screen = new THREE.Mesh(new THREE.PlaneGeometry(1.1, 0.7), screenMat);
-      screen.position.set(0, 0.9, 0.305);
-      body.add(screen);
-      body.position.set(k.x, 0, k.z);
-      body.rotation.y = k.rot;
-      this.group.add(body);
+      this.addMesh(mergeGeometries(bodyParts).geometry, bodyMat);
+      const screenAtlas = this.track(createScreenAtlas(consoles.map((k) => k.seed)));
+      const screenMat = this.track(new THREE.MeshBasicMaterial({ map: screenAtlas, toneMapped: false }));
+      this.addMesh(mergeGeometries(screenParts).geometry, screenMat, { cast: false, receive: false });
     }
 
     // Cryo tanks: glass shell with a glowing liquid core and metal base.
@@ -606,15 +712,21 @@ export class Level {
       color: 0x0d3a2a, emissive: 0x25ff9a, emissiveIntensity: 1.1, roughness: 0.3,
     }));
     const baseMat = this.track(new THREE.MeshStandardMaterial({ color: 0x30363e, roughness: 0.5, metalness: 0.6 }));
-    for (const t of tanks) {
-      const glass = this.addMesh(new THREE.CylinderGeometry(0.6, 0.6, 2.4, 20, 1, true), glassMat, { cast: false });
-      glass.position.set(t.x, 1.4, t.z);
-      const liquid = this.addMesh(new THREE.CylinderGeometry(0.5, 0.5, 2.1, 16), liquidMat, { cast: false, receive: false });
-      liquid.position.set(t.x, 1.3, t.z);
-      const base = this.addMesh(new THREE.CylinderGeometry(0.66, 0.7, 0.2, 20), baseMat);
-      base.position.set(t.x, 0.1, t.z);
-      const cap = this.addMesh(new THREE.CylinderGeometry(0.62, 0.62, 0.16, 20), baseMat);
-      cap.position.set(t.x, 2.6, t.z);
+    // Each tank part is merged across all tanks: glass, liquid, and base + cap.
+    const at = (t, y) => placeMatrix(t.x, y, t.z);
+    if (tanks.length > 0) {
+      this.addMesh(mergeGeometries(tanks.map((t) => ({
+        geometry: new THREE.CylinderGeometry(0.6, 0.6, 2.4, 20, 1, true), matrix: at(t, 1.4),
+      }))).geometry, glassMat, { cast: false });
+      this.addMesh(mergeGeometries(tanks.map((t) => ({
+        geometry: new THREE.CylinderGeometry(0.5, 0.5, 2.1, 16), matrix: at(t, 1.3),
+      }))).geometry, liquidMat, { cast: false, receive: false });
+      const metalParts = [];
+      for (const t of tanks) {
+        metalParts.push({ geometry: new THREE.CylinderGeometry(0.66, 0.7, 0.2, 20), matrix: at(t, 0.1) });
+        metalParts.push({ geometry: new THREE.CylinderGeometry(0.62, 0.62, 0.16, 20), matrix: at(t, 2.6) });
+      }
+      this.addMesh(mergeGeometries(metalParts).geometry, baseMat);
     }
 
     // Ceiling pipes (decor).
@@ -666,12 +778,16 @@ export class Level {
     this.lights = [];
     let pointBudget = MAX_POINT_LIGHTS;
 
+    // Every fixture panel and emergency beacon is one mesh. Their colours animate, so
+    // the colour is stored per vertex and rewritten in update() (no per-fixture material).
+    const parts = [];
     const addFixture = (p, emergency) => {
       if (emergency) {
-        const beaconMat = this.track(new THREE.MeshBasicMaterial({ color: 0xff2a1a, toneMapped: false }));
-        const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.14, 12, 10), beaconMat);
-        beacon.position.set(p.x, WALL_HEIGHT - 0.35, p.z);
-        this.group.add(beacon);
+        const part = parts.push({
+          geometry: new THREE.SphereGeometry(0.14, 12, 10),
+          matrix: placeMatrix(p.x, WALL_HEIGHT - 0.35, p.z),
+          hex: 0xff2a1a,
+        }) - 1;
         let light = null;
         if (pointBudget > 0) {
           pointBudget--;
@@ -679,13 +795,10 @@ export class Level {
           light.position.set(p.x, WALL_HEIGHT - 0.5, p.z);
           this.group.add(light);
         }
-        this.lights.push({ kind: 'emergency', light, beacon, beaconMat, phase: Math.random() * 6, base: 22 });
+        this.lights.push({ kind: 'emergency', light, part, phase: Math.random() * 6, base: 22 });
         return;
       }
-      const mat = this.track(new THREE.MeshBasicMaterial({ color: 0xdfeaff, toneMapped: false }));
-      const panel = new THREE.Mesh(panelGeo, mat);
-      panel.position.set(p.x, WALL_HEIGHT - 0.02, p.z);
-      this.group.add(panel);
+      const part = parts.push({ geometry: panelGeo, matrix: placeMatrix(p.x, WALL_HEIGHT - 0.02, p.z), hex: 0xdfeaff }) - 1;
       let light = null;
       if (pointBudget > 0) {
         pointBudget--;
@@ -694,32 +807,63 @@ export class Level {
         this.group.add(light);
       }
       this.lights.push({
-        kind: 'flicker', light, panelMat: mat, phase: Math.random() * 6,
+        kind: 'flicker', light, part, phase: Math.random() * 6,
         base: 16, timer: 1 + Math.random() * 4, off: false,
       });
     };
 
     for (const p of this.plan.lights) addFixture(p, false);
     for (const p of this.plan.emergencyLights) addFixture(p, true);
+
+    if (parts.length > 0) {
+      const merged = mergeGeometries(parts.map(({ geometry, matrix }) => ({ geometry, matrix })));
+      const colors = new Float32Array(merged.geometry.attributes.position.count * 3);
+      this.fixtureColors = colors;
+      for (const L of this.lights) {
+        L.vStart = merged.offsets[L.part];
+        L.vCount = parts[L.part].geometry.attributes.position.count;
+        const c = new THREE.Color(parts[L.part].hex);
+        this.setFixtureColor(L.vStart, L.vCount, c.r, c.g, c.b);
+      }
+      merged.geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3).setUsage(THREE.DynamicDrawUsage));
+      this.fixtureAttr = merged.geometry.attributes.color;
+      const fixtureMat = this.track(new THREE.MeshBasicMaterial({ vertexColors: true, toneMapped: false }));
+      this.addMesh(merged.geometry, fixtureMat, { cast: false, receive: false });
+    }
+  }
+
+  /** Writes a linear RGB colour to `count` vertices starting at `start`. */
+  setFixtureColor(start, count, r, g, b) {
+    const c = this.fixtureColors;
+    for (let k = start; k < start + count; k++) {
+      c[k * 3] = r;
+      c[k * 3 + 1] = g;
+      c[k * 3 + 2] = b;
+    }
   }
 
   buildSigns(anisotropy) {
+    // Signs of one kind share a texture and a material, so they merge into one mesh per kind.
     const geo = new THREE.PlaneGeometry(1.2, 0.6);
-    const mats = {};
+    const byKind = new Map();
     for (const s of this.plan.signs) {
-      if (!mats[s.kind]) {
-        mats[s.kind] = this.track(new THREE.MeshStandardMaterial({
-          map: this.track(createWarningSignTexture(s.kind, { anisotropy })),
-          roughness: 0.6,
-          emissive: 0x221100,
-          emissiveIntensity: 0.6,
-        }));
-      }
-      const mesh = new THREE.Mesh(geo, mats[s.kind]);
-      mesh.position.set(s.x, s.y, s.z);
-      mesh.rotation.y = s.rotY;
-      this.group.add(mesh);
+      if (!byKind.has(s.kind)) byKind.set(s.kind, []);
+      byKind.get(s.kind).push(s);
     }
+    for (const [kind, signs] of byKind) {
+      const mat = this.track(new THREE.MeshStandardMaterial({
+        map: this.track(createWarningSignTexture(kind, { anisotropy })),
+        roughness: 0.6,
+        emissive: 0x221100,
+        emissiveIntensity: 0.6,
+      }));
+      const parts = signs.map((s) => ({
+        geometry: geo,
+        matrix: placeMatrix(s.x, s.y, s.z, s.rotY),
+      }));
+      this.addMesh(mergeGeometries(parts).geometry, mat, { cast: false, receive: false });
+    }
+    geo.dispose();
   }
 
   /**
@@ -767,14 +911,15 @@ export class Level {
         }
         const level = L.off ? 0.08 : 0.94 + 0.06 * Math.sin(t * 9 + L.phase);
         if (L.light) L.light.intensity = L.base * level;
-        L.panelMat.color.setRGB(0.87 * level, 0.92 * level, 1.0 * level);
+        this.setFixtureColor(L.vStart, L.vCount, 0.87 * level, 0.92 * level, 1.0 * level);
       } else {
         // Emergency beacon: sharp alarm pulse.
         const pulse = Math.pow(Math.max(0, Math.sin(t * 5 + L.phase)), 6);
         if (L.light) L.light.intensity = L.base * pulse;
-        L.beaconMat.color.setRGB(0.25 + 0.75 * pulse, 0.05 * pulse, 0.03 * pulse + 0.02);
+        this.setFixtureColor(L.vStart, L.vCount, 0.25 + 0.75 * pulse, 0.05 * pulse, 0.03 * pulse + 0.02);
       }
     }
+    if (this.fixtureAttr) this.fixtureAttr.needsUpdate = true;
   }
 
   /** Frees geometry, materials, textures and pickups. */

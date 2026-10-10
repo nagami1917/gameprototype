@@ -108,11 +108,17 @@ function buildSharedAssets(typeId) {
 /** Hit-detection materials are invisible but still raycastable. */
 const hitboxMaterial = new THREE.MeshBasicMaterial({ visible: false });
 
-/** Builds the procedural humanoid (feet at origin, facing +Z). */
-function buildModel(typeId, assets) {
-  const type = ENEMY_TYPES[typeId];
-  const s = type.scale;
-  const pal = type.palette;
+/*
+ * Body materials are pooled per enemy type instead of being created and
+ * disposed with every enemy. Disposing a material releases its shader program
+ * once no other material uses it, so a wave that clears the field used to
+ * force every enemy program to be compiled again when the next wave spawned.
+ * Pooled materials stay alive, so their programs stay compiled.
+ */
+const bodyMaterialPools = {};
+
+function createBodyMaterials(typeId) {
+  const pal = ENEMY_TYPES[typeId].palette;
   const mats = {
     skin: new THREE.MeshStandardMaterial({ color: pal.skin, roughness: 0.85, emissive: 0x000000 }),
     cloth: new THREE.MeshStandardMaterial({ color: pal.cloth, roughness: 0.95, emissive: 0x000000 }),
@@ -121,6 +127,28 @@ function buildModel(typeId, assets) {
   if (pal.armor) {
     mats.armor = new THREE.MeshStandardMaterial({ color: pal.armor, roughness: 0.45, metalness: 0.6, emissive: 0x000000 });
   }
+  return mats;
+}
+
+function acquireBodyMaterials(typeId) {
+  const pool = bodyMaterialPools[typeId] || (bodyMaterialPools[typeId] = []);
+  return pool.length > 0 ? pool.pop() : createBodyMaterials(typeId);
+}
+
+function releaseBodyMaterials(typeId, mats) {
+  for (const key of Object.keys(mats)) {
+    const m = mats[key];
+    if (m.emissive && key !== 'glow') m.emissive.setHex(0x000000); // clear any damage flash
+  }
+  bodyMaterialPools[typeId].push(mats);
+}
+
+/** Builds the procedural humanoid (feet at origin, facing +Z). */
+function buildModel(typeId, assets) {
+  const type = ENEMY_TYPES[typeId];
+  const s = type.scale;
+  const pal = type.palette;
+  const mats = acquireBodyMaterials(typeId);
   const root = new THREE.Group();
   // Tilt in local space first, then yaw: a falling body topples relative to its facing.
   root.rotation.order = 'YXZ';
@@ -215,18 +243,25 @@ function buildModel(typeId, assets) {
   };
 }
 
+/*
+ * Health bar materials never change per enemy, so every bar shares one pair.
+ * (Previously each enemy allocated and disposed its own pair.)
+ */
+const barMaterials = {
+  bg: new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6, depthWrite: false }),
+  fg: new THREE.MeshBasicMaterial({ color: 0xff2a2a, depthWrite: false }),
+};
+
 /** Floating health bar that always faces the camera. */
 function buildHealthBar(assets) {
   const group = new THREE.Group();
-  const bgMat = new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.6, depthWrite: false });
-  const fgMat = new THREE.MeshBasicMaterial({ color: 0xff2a2a, depthWrite: false });
-  const bg = new THREE.Mesh(assets.barBgGeo, bgMat);
+  const bg = new THREE.Mesh(assets.barBgGeo, barMaterials.bg);
   bg.scale.set(0.9, 0.1, 1);
-  const fg = new THREE.Mesh(assets.barBgGeo, fgMat);
+  const fg = new THREE.Mesh(assets.barBgGeo, barMaterials.fg);
   fg.scale.set(0.86, 0.06, 1);
   fg.position.z = 0.001;
   group.add(bg, fg);
-  group.userData = { fg, bgMat, fgMat };
+  group.userData = { fg };
   group.visible = false;
   return group;
 }
@@ -236,6 +271,30 @@ function wrapAngle(a) {
   while (a > Math.PI) a -= Math.PI * 2;
   while (a < -Math.PI) a += Math.PI * 2;
   return a;
+}
+
+/**
+ * Builds one visible model of every enemy type so their shader programs can be
+ * compiled before the first wave (see Game.prewarmShaders). It draws no random
+ * numbers, so it does not change the sequence of spawns. Returns a function
+ * that removes the models again and returns their materials to the pool.
+ */
+export function warmEnemyVisuals(scene) {
+  const group = new THREE.Group();
+  const models = [];
+  for (const typeId of Object.keys(ENEMY_TYPES)) {
+    const assets = buildSharedAssets(typeId);
+    const model = buildModel(typeId, assets);
+    const bar = buildHealthBar(assets);
+    bar.visible = true;
+    group.add(model.root, bar);
+    models.push({ typeId, model });
+  }
+  scene.add(group);
+  return () => {
+    scene.remove(group);
+    for (const { typeId, model } of models) releaseBodyMaterials(typeId, model.materials);
+  };
 }
 
 export class Enemy {
@@ -299,6 +358,7 @@ export class Enemy {
     this.swingPending = false; // set when an attack starts; the game plays the swing sound
     this.wasAggro = false;     // used by the game to play the growl once on aggro
     this.deathDir = Math.random() < 0.5 ? -1 : 1;
+    this.disposed = false;
 
     // Visuals
     const assets = buildSharedAssets(typeId);
@@ -461,12 +521,12 @@ export class Enemy {
     return [this.model.hitboxes.body, this.model.hitboxes.head];
   }
 
-  /** Removes the visuals from the scene and releases per-enemy materials. */
+  /** Removes the visuals from the scene and returns the body materials to the pool. */
   dispose() {
+    if (this.disposed) return;
+    this.disposed = true;
     this.scene.remove(this.model.root);
     this.scene.remove(this.healthBar);
-    for (const m of Object.values(this.model.materials)) m.dispose();
-    this.healthBar.userData.bgMat.dispose();
-    this.healthBar.userData.fgMat.dispose();
+    releaseBodyMaterials(this.typeId, this.model.materials);
   }
 }
