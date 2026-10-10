@@ -116,6 +116,43 @@ body {
   animation: indicator-fade 1s ease-out forwards;
 }
 
+.dash-effect {
+  position: fixed;
+  inset: 0;
+  z-index: 3;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.dash-effect::before {
+  content: "";
+  position: absolute;
+  inset: -35%;
+  opacity: 0;
+  background: repeating-conic-gradient(
+    from 0deg at 50% 50%,
+    transparent 0deg 7deg,
+    rgba(170, 235, 255, 0.34) 7.4deg 7.8deg,
+    transparent 8.2deg 14deg
+  );
+  -webkit-mask-image: radial-gradient(ellipse at center, transparent 0 22%, #000 76%);
+  mask-image: radial-gradient(ellipse at center, transparent 0 22%, #000 76%);
+}
+
+.dash-effect.active::before {
+  animation: dash-streak 0.3s ease-out;
+}
+
+.dash-effect[data-direction="left"]::before { --dash-shift-x: 5%; }
+.dash-effect[data-direction="right"]::before { --dash-shift-x: -5%; }
+.dash-effect[data-direction="back"]::before { --dash-shift-x: 0%; }
+
+@keyframes dash-streak {
+  0% { opacity: 0; transform: translateX(var(--dash-shift-x, 0)) scale(0.72); }
+  28% { opacity: 0.9; }
+  100% { opacity: 0; transform: translateX(var(--dash-shift-x, 0)) scale(1.18); }
+}
+
 @keyframes indicator-fade {
   0% { opacity: 1; }
   70% { opacity: 1; }
@@ -306,6 +343,45 @@ body {
 
 .health-fill.low {
   background: linear-gradient(90deg, #a00000, #ff4438);
+}
+
+/* Stamina (bottom-centre) */
+.stamina-meter {
+  position: absolute;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  width: min(300px, 34vw);
+}
+
+.stamina-label {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  letter-spacing: 0.22em;
+}
+
+.stamina-bar {
+  position: relative;
+  height: 10px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: rgba(0, 0, 0, 0.62);
+}
+
+.stamina-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 100%;
+  background: linear-gradient(90deg, #15aebe, #8ff5ff);
+  box-shadow: 0 0 12px rgba(80, 220, 255, 0.6);
+  transition: width 0.12s linear, background 0.2s ease;
+}
+
+.stamina-fill.low {
+  background: linear-gradient(90deg, #a86b20, #ffd26a);
 }
 
 /* Weapon (bottom-right) */

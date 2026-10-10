@@ -31,6 +31,7 @@ export class UI {
     const ids = [
       'hud', 'hud-wave', 'hud-remaining', 'hud-phase', 'hud-score', 'hud-kills',
       'hud-health-text', 'hud-health-fill', 'hud-weapon', 'hud-ammo', 'hud-reserve', 'hud-status',
+      'hud-stamina-text', 'hud-stamina-bar', 'hud-stamina-fill', 'dash-effect',
       'crosshair', 'hitmarker', 'flash-damage', 'low-health', 'damage-indicator',
       'banner', 'banner-title', 'banner-sub', 'countdown', 'toasts',
       'menu-high-score', 'menu-high-wave', 'go-score', 'go-kills', 'go-wave', 'go-headshots', 'go-record',
@@ -258,7 +259,7 @@ export class UI {
 
   /**
    * @param {object} s  snapshot:
-   *   health, maxHealth, weapon {name, ammo, reserve, reloading, switching, slot},
+   *   health, maxHealth, stamina, maxStamina, weapon {name, ammo, reserve, reloading, switching, slot},
    *   kills, score, wave, remaining, phase ('countdown'|'active'|'intermission'|...), phaseText
    */
   updateHud(s) {
@@ -275,6 +276,14 @@ export class UI {
       this.el['hud-health-fill'].style.width = `${pct}%`;
       this.el['hud-health-fill'].classList.toggle('low', pct < 30);
       this.el['low-health'].classList.toggle('active', pct < 30 && pct > 0);
+    });
+
+    const stamina = Math.max(0, Math.min(100, Math.ceil((s.stamina / s.maxStamina) * 100)));
+    this.diff('stamina', stamina, (v) => {
+      this.setText(this.el['hud-stamina-text'], `${v}%`);
+      this.el['hud-stamina-fill'].style.width = `${v}%`;
+      this.el['hud-stamina-fill'].classList.toggle('low', v < 25);
+      this.el['hud-stamina-bar'].setAttribute('aria-valuenow', String(v));
     });
 
     const w = s.weapon;
@@ -297,6 +306,15 @@ export class UI {
     ch.classList.remove('fire');
     void ch.offsetWidth; // restart the CSS animation
     ch.classList.add('fire');
+  }
+
+  /** Brief speed-line flash when the player dashes. */
+  dashEffect(direction) {
+    const el = this.el['dash-effect'];
+    el.dataset.direction = direction.z < 0 ? 'back' : direction.x < 0 ? 'left' : 'right';
+    el.classList.remove('active');
+    void el.offsetWidth;
+    el.classList.add('active');
   }
 
   /** Hit marker: `kill` shows red, `headshot` adds a flourish. */
@@ -369,6 +387,11 @@ export class UI {
   /** Resets per-run HUD state (so the next run repaints every value). */
   resetHud() {
     this.lastHud = {};
+    this.el['hud-stamina-fill'].style.width = '100%';
+    this.el['hud-stamina-fill'].classList.remove('low');
+    this.el['hud-stamina-bar'].setAttribute('aria-valuenow', '100');
+    this.setText(this.el['hud-stamina-text'], '100%');
+    this.el['dash-effect'].classList.remove('active');
     this.el['low-health'].classList.remove('active');
     this.el['flash-damage'].classList.remove('active');
     this.setCountdown('');

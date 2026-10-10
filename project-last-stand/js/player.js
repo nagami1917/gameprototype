@@ -16,6 +16,14 @@ import { moveCylinder } from './collision.js';
 export const PLAYER_MAX_HEALTH = 100;
 const WALK_SPEED = 4.6;
 const SPRINT_SPEED = 7.0;
+const DASH_SPEED = 18;
+const DASH_DURATION = 0.28;
+const DASH_COOLDOWN = 0.65;
+const MAX_STAMINA = 100;
+const DASH_STAMINA_COST = 32;
+const SPRINT_STAMINA_DRAIN = 24;
+const STAMINA_REGEN = 28;
+const STAMINA_REGEN_DELAY = 0.8;
 const AIM_SPEED_MULT = 0.6;
 const JUMP_VELOCITY = 7.4;
 const GRAVITY = 22;
@@ -56,6 +64,14 @@ export class Player {
     this.aimAmount = 0;
     this.sprinting = false;
     this.speed = 0;
+    this.dashTimer = 0;
+    this.dashCooldown = 0;
+    this.dashDirection = new THREE.Vector3();
+    this.stamina = MAX_STAMINA;
+    this.maxStamina = MAX_STAMINA;
+    this.staminaRegenDelay = 0;
+    this.dashVisual = 0;
+    this.dashRoll = 0;
 
     this.recoil = { pitch: 0, yaw: 0 };
     this.trauma = 0;
@@ -83,6 +99,13 @@ export class Player {
     this.aiming = false;
     this.aimAmount = 0;
     this.stepDistance = 0;
+    this.dashTimer = 0;
+    this.dashCooldown = 0;
+    this.dashDirection.set(0, 0, 0);
+    this.stamina = MAX_STAMINA;
+    this.staminaRegenDelay = 0;
+    this.dashVisual = 0;
+    this.dashRoll = 0;
   }
 
   /** Mouse look. dx/dy are raw pixel deltas from pointer lock. */
@@ -118,7 +141,7 @@ export class Player {
   /**
    * Applies one frame of movement.
    * @param {number} dt
-   * @param {object} controls  { moveX (-1..1 strafe), moveZ (-1..1 forward), sprint, jump, aim }
+   * @param {object} controls  { moveX (-1..1 strafe), moveZ (-1..1 forward), sprint, jump, dash, aim }
    * @param {Array} colliders  static boxes
    * @param {{minX:number,minZ:number,maxX:number,maxZ:number}} bounds
    */
@@ -128,6 +151,9 @@ export class Player {
     this.recoil.pitch *= recover;
     this.recoil.yaw *= recover;
     this.trauma = Math.max(0, this.trauma - dt * 1.3);
+    this.dashCooldown = Math.max(0, this.dashCooldown - dt);
+    this.staminaRegenDelay = Math.max(0, this.staminaRegenDelay - dt);
+    this.dashVisual *= Math.exp(-8 * dt);
 
     this.aimAmount += ((controls.aim && this.alive ? 1 : 0) - this.aimAmount) * Math.min(1, dt * 10);
     this.aiming = this.aimAmount > 0.5;
@@ -155,16 +181,46 @@ export class Player {
     }
     const wantsMove = inputLen > 0.01;
 
-    this.sprinting = !!controls.sprint && controls.moveZ > 0.1 && !this.aiming && this.onGround;
+    if (controls.dash && this.onGround && this.dashCooldown <= 0 && this.stamina >= DASH_STAMINA_COST) {
+      const dashX = r.x * controls.dash.x + f.x * controls.dash.z;
+      const dashZ = r.z * controls.dash.x + f.z * controls.dash.z;
+      const dashLen = Math.hypot(dashX, dashZ);
+      if (dashLen > 0.01) {
+        this.dashDirection.set(dashX / dashLen, 0, dashZ / dashLen);
+        this.dashTimer = DASH_DURATION;
+        this.dashCooldown = DASH_COOLDOWN;
+        this.stamina -= DASH_STAMINA_COST;
+        this.staminaRegenDelay = STAMINA_REGEN_DELAY;
+        this.dashVisual = 1;
+        this.dashRoll = -controls.dash.x * 0.08;
+        this.hooks.onDash?.(controls.dash);
+      }
+    }
+
+    this.sprinting = !!controls.sprint && controls.moveZ > 0.1 && !this.aiming
+      && this.onGround && this.stamina > 0 && this.dashTimer <= 0;
+    if (this.sprinting) {
+      this.stamina = Math.max(0, this.stamina - SPRINT_STAMINA_DRAIN * dt);
+      this.staminaRegenDelay = STAMINA_REGEN_DELAY;
+      if (this.stamina <= 0) this.sprinting = false;
+    } else if (this.staminaRegenDelay <= 0) {
+      this.stamina = Math.min(MAX_STAMINA, this.stamina + STAMINA_REGEN * dt);
+    }
     let targetSpeed = this.sprinting ? SPRINT_SPEED : WALK_SPEED;
     if (this.aiming) targetSpeed *= AIM_SPEED_MULT;
     if (!wantsMove) targetSpeed = 0;
 
     // Accelerate toward target velocity (quicker on the ground than in air).
-    const accel = this.onGround ? 14 : 3;
-    const k = Math.min(1, accel * dt);
-    this.velocity.x += (mx * targetSpeed - this.velocity.x) * k;
-    this.velocity.z += (mz * targetSpeed - this.velocity.z) * k;
+    if (this.dashTimer > 0) {
+      this.velocity.x = this.dashDirection.x * DASH_SPEED;
+      this.velocity.z = this.dashDirection.z * DASH_SPEED;
+      this.dashTimer = Math.max(0, this.dashTimer - dt);
+    } else {
+      const accel = this.onGround ? 14 : 3;
+      const k = Math.min(1, accel * dt);
+      this.velocity.x += (mx * targetSpeed - this.velocity.x) * k;
+      this.velocity.z += (mz * targetSpeed - this.velocity.z) * k;
+    }
 
     // Jump and gravity.
     if (controls.jump && this.onGround) {
@@ -235,12 +291,12 @@ export class Player {
     cam.rotation.set(
       this.pitch + this.recoil.pitch + sy * 0.02,
       this.yaw + this.recoil.yaw + sx * 0.02,
-      sx * 0.015,
+      sx * 0.015 + this.dashRoll * this.dashVisual,
       'YXZ',
     );
 
     // ADS narrows the field of view a little.
-    const targetFov = this.baseFov * (1 - 0.12 * this.aimAmount);
+    const targetFov = this.baseFov * (1 - 0.12 * this.aimAmount) + this.dashVisual * 10;
     if (Math.abs(cam.fov - targetFov) > 0.01) {
       cam.fov = targetFov;
       cam.updateProjectionMatrix();
@@ -269,4 +325,7 @@ export class Player {
   }
 }
 
-export const PLAYER_CONSTANTS = { RADIUS, HEIGHT, EYE_HEIGHT, WALK_SPEED, SPRINT_SPEED };
+export const PLAYER_CONSTANTS = {
+  RADIUS, HEIGHT, EYE_HEIGHT, WALK_SPEED, SPRINT_SPEED,
+  MAX_STAMINA, DASH_STAMINA_COST, DASH_SPEED, DASH_DURATION,
+};

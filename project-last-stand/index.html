@@ -30,6 +30,7 @@
   <div id="flash-damage" class="flash-damage" aria-hidden="true"></div>
   <div id="low-health" class="low-health" aria-hidden="true"></div>
   <div id="damage-indicator" class="damage-indicator" aria-hidden="true"><span></span></div>
+  <div id="dash-effect" class="dash-effect" aria-hidden="true"></div>
 
   <!-- In-game HUD -->
   <div id="hud" class="hud hidden" aria-hidden="true">
@@ -59,6 +60,13 @@
     <div class="hud-bottom-left">
       <div class="health-label">HEALTH <span id="hud-health-text">100 / 100</span></div>
       <div class="health-bar"><div class="health-fill" id="hud-health-fill"></div></div>
+    </div>
+
+    <div class="stamina-meter">
+      <div class="stamina-label"><span>STAMINA</span><span id="hud-stamina-text">100%</span></div>
+      <div class="stamina-bar" id="hud-stamina-bar" role="progressbar" aria-label="Stamina" aria-valuemin="0" aria-valuemax="100" aria-valuenow="100">
+        <div class="stamina-fill" id="hud-stamina-fill"></div>
+      </div>
     </div>
 
     <div class="hud-bottom-right">
@@ -150,8 +158,9 @@
           <tr><th>Left click</th><td>Fire (hold for automatic weapons)</td></tr>
           <tr><th>Right click</th><td>Aim down sights</td></tr>
           <tr><th>R</th><td>Reload</td></tr>
-          <tr><th>Shift</th><td>Sprint (forward)</td></tr>
+          <tr><th>Shift</th><td>Sprint forward (uses stamina)</td></tr>
           <tr><th>Space</th><td>Jump</td></tr>
+          <tr><th>Shift + A/S/D, then Space</th><td>Dash left / backward / right (uses stamina)</td></tr>
           <tr><th>1 / 2</th><td>Switch weapon</td></tr>
           <tr><th>Esc</th><td>Pause / release mouse</td></tr>
         </tbody>

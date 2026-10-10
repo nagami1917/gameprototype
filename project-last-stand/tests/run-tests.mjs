@@ -138,6 +138,46 @@ async function main() {
     assert(hasLineOfSight({ x: 0, y: 1, z: 0 }, { x: 8, y: 1, z: 3 }, [b]), 'open line should be visible');
   });
 
+  /* ---------------- player movement ---------------- */
+  const THREE = await import('three');
+  const { Player } = await import(pathToFileURL(path.join(JS_DIR, 'player.js')).href);
+  console.log('\nPlayer movement');
+
+  test('dash moves backward and sideways relative to player facing', () => {
+    for (const { dash, axis, sign } of [
+      { dash: { x: 0, z: -1 }, axis: 'z', sign: 1 },
+      { dash: { x: -1, z: 0 }, axis: 'x', sign: -1 },
+      { dash: { x: 1, z: 0 }, axis: 'x', sign: 1 },
+    ]) {
+      const player = new Player({ camera: new THREE.PerspectiveCamera() });
+      player.spawn(0, 0, 0);
+      player.update(0.05, { moveX: 0, moveZ: 0, dash }, [], null);
+      assert(player.position[axis] * sign > 0.5, `dash should move along ${axis} in direction ${sign}`);
+    }
+  });
+
+  test('dash spends stamina and covers the boosted distance', () => {
+    const player = new Player({ camera: new THREE.PerspectiveCamera() });
+    player.spawn(0, 0, 0);
+    for (let i = 0; i < 6; i++) {
+      player.update(0.05, { moveX: 0, moveZ: 0, dash: i === 0 ? { x: 0, z: -1 } : null }, [], null);
+    }
+    assertNear(player.stamina, 68, 1e-6, 'dash stamina cost');
+    assert(player.position.z > 4.5, `dash should cover a long burst (z=${player.position.z})`);
+  });
+
+  test('sprinting drains stamina and stamina regenerates after a delay', () => {
+    const player = new Player({ camera: new THREE.PerspectiveCamera() });
+    player.spawn(0, 0, 0);
+    for (let i = 0; i < 10; i++) {
+      player.update(0.1, { moveX: 0, moveZ: 1, sprint: true }, [], null);
+    }
+    assertNear(player.stamina, 76, 1e-6, 'sprint stamina drain');
+    const afterSprint = player.stamina;
+    for (let i = 0; i < 9; i++) player.update(0.1, { moveX: 0, moveZ: 0 }, [], null);
+    assert(player.stamina > afterSprint, 'stamina should regenerate after the recovery delay');
+  });
+
   /* ---------------- navigation ---------------- */
   const enemyAI = await import(pathToFileURL(path.join(JS_DIR, 'enemyAI.js')).href);
   const { NavGrid } = enemyAI;

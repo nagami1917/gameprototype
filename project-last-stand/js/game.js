@@ -42,6 +42,7 @@ const HEADSHOT_BONUS = 50;
 const MAX_FRAME_ERRORS = 5;
 const SPAWN_MIN_DISTANCE = 14;
 const START_YAW = -Math.PI * 0.75; // face into the start room
+const FLASHLIGHT_PAN_RESPONSE = 8;
 
 export class Game {
   /**
@@ -106,9 +107,12 @@ export class Game {
     this.scene.add(new THREE.HemisphereLight(0x8fa3bd, 0x1a1a20, 0.9));
 
     // Helmet flashlight with shadows (toggle in settings).
-    this.flashlight = new THREE.SpotLight(0xdfeeff, 55, 30, 0.5, 0.5, 2);
+    this.flashlight = new THREE.SpotLight(0xdfeeff, 100, 30, 0.7, 0.5, 2);
     this.flashlight.position.set(0.15, -0.08, 0);
     this.flashlight.target.position.set(0, -0.1, -10);
+    this.flashlightAimQuaternion = this.camera.quaternion.clone();
+    this.flashlightAimDirection = new THREE.Vector3(0, 0, -1);
+    this.flashlightTargetPosition = new THREE.Vector3();
     this.flashlight.castShadow = this.settings.shadows;
     this.flashlight.shadow.mapSize.set(1024, 1024);
     this.flashlight.shadow.camera.near = 0.1;
@@ -116,7 +120,7 @@ export class Game {
     this.flashlight.shadow.bias = -0.0008;
     this.flashlight.shadow.normalBias = 0.03;
     this.camera.add(this.flashlight);
-    this.camera.add(this.flashlight.target);
+    this.scene.add(this.flashlight.target);
 
     this.level = new Level(this.scene, { renderer: this.renderer });
     this.effects = new EffectsManager(this.scene, { bounds: this.level.bounds });
@@ -126,6 +130,7 @@ export class Game {
       camera: this.camera,
       hooks: {
         onFootstep: (sprinting) => this.audio.playFootstep(sprinting),
+        onDash: (direction) => this.ui.dashEffect(direction),
         onDamaged: (amount, from) => this.onPlayerDamaged(amount, from),
         onDeath: () => this.onPlayerDeath(),
       },
@@ -347,6 +352,17 @@ export class Game {
   resetPlayerToStart() {
     const start = this.level.playerStart;
     this.player.spawn(start.x, start.z, START_YAW);
+    this.player.updateCamera();
+    this.flashlightAimQuaternion.copy(this.camera.quaternion);
+    this.updateFlashlight(0);
+  }
+
+  updateFlashlight(dt) {
+    const follow = 1 - Math.exp(-FLASHLIGHT_PAN_RESPONSE * dt);
+    this.flashlightAimQuaternion.slerp(this.camera.quaternion, follow);
+    this.flashlight.getWorldPosition(this.flashlightTargetPosition);
+    this.flashlightAimDirection.set(0, 0, -10).applyQuaternion(this.flashlightAimQuaternion);
+    this.flashlight.target.position.copy(this.flashlightTargetPosition).add(this.flashlightAimDirection);
   }
 
   setViewmodelVisible(visible) {
@@ -540,11 +556,16 @@ export class Game {
     const back = k.isDown('KeyS') || k.isDown('ArrowDown') ? 1 : 0;
     const right = k.isDown('KeyD') || k.isDown('ArrowRight') ? 1 : 0;
     const left = k.isDown('KeyA') || k.isDown('ArrowLeft') ? 1 : 0;
+    const sprint = k.isDown('ShiftLeft') || k.isDown('ShiftRight');
+    const dashChord = sprint && (k.isDown('KeyA') || k.isDown('KeyS') || k.isDown('KeyD'));
     return {
       moveZ: fwd - back,
       moveX: right - left,
-      sprint: k.isDown('ShiftLeft') || k.isDown('ShiftRight'),
-      jump: k.isDown('Space'),
+      sprint,
+      jump: k.isDown('Space') && !dashChord,
+      dash: dashChord && k.wasPressed('Space')
+        ? { x: Number(k.isDown('KeyD')) - Number(k.isDown('KeyA')), z: -Number(k.isDown('KeyS')) }
+        : null,
       aim: k.mouseDown(2) && k.locked,
     };
   }
@@ -690,6 +711,8 @@ export class Game {
         break;
     }
 
+    this.updateFlashlight(dt);
+
     if (this.state === STATE.PLAYING || this.state === STATE.GAMEOVER || this.state === STATE.PAUSED) {
       this.ui.updateHud(this.buildHudSnapshot());
     }
@@ -708,6 +731,8 @@ export class Game {
     return {
       health: this.player.health,
       maxHealth: this.player.maxHealth,
+      stamina: this.player.stamina,
+      maxStamina: this.player.maxStamina,
       weapon: this.weapons.getHudData(),
       kills: this.stats.kills,
       score: this.stats.score,
