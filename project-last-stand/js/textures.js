@@ -238,13 +238,16 @@ export function createDoorTexture({ anisotropy = 4 } = {}) {
   return toTexture(c, { anisotropy, repeat: false });
 }
 
-/** Lab monitor / console screen (emissive). */
-export function createScreenTexture(seed = 1, { anisotropy = 4 } = {}) {
-  const w = 256;
-  const h = 160;
-  const c = makeCanvas(w, h);
-  const ctx = c.getContext('2d');
+const SCREEN_W = 256;
+const SCREEN_H = 160;
+
+/** Paints one lab monitor design into `ctx`, offset down by `oy` pixels. */
+function paintScreen(ctx, seed, oy) {
+  const w = SCREEN_W;
+  const h = SCREEN_H;
   const rand = makeRng(seed * 977);
+  ctx.save();
+  ctx.translate(0, oy);
   ctx.fillStyle = '#041018';
   ctx.fillRect(0, 0, w, h);
   ctx.fillStyle = '#34ffd0';
@@ -261,6 +264,26 @@ export function createScreenTexture(seed = 1, { anisotropy = 4 } = {}) {
   // Scanlines
   ctx.fillStyle = 'rgba(0,0,0,0.25)';
   for (let y = 0; y < h; y += 4) ctx.fillRect(0, y, w, 1);
+  ctx.restore();
+}
+
+/** Lab monitor / console screen (emissive). */
+export function createScreenTexture(seed = 1, { anisotropy = 4 } = {}) {
+  const c = makeCanvas(SCREEN_W, SCREEN_H);
+  paintScreen(c.getContext('2d'), seed, 0);
+  return toTexture(c, { anisotropy, repeat: false });
+}
+
+/**
+ * Several lab screens stacked vertically in one texture (row 0 at the top), so
+ * every console can share one material and one draw call. Each row is painted
+ * exactly like createScreenTexture(seed).
+ */
+export function createScreenAtlas(seeds, { anisotropy = 4 } = {}) {
+  const rows = Math.max(1, seeds.length);
+  const c = makeCanvas(SCREEN_W, SCREEN_H * rows);
+  const ctx = c.getContext('2d');
+  seeds.forEach((seed, i) => paintScreen(ctx, seed, i * SCREEN_H));
   return toTexture(c, { anisotropy, repeat: false });
 }
 

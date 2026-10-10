@@ -17,6 +17,7 @@
 import * as THREE from 'three';
 import { raycastBoxes } from './collision.js';
 import { createGlowTexture } from './textures.js';
+import { mergeMeshesByMaterial } from './level.js';
 
 export const WEAPON_DEFS = {
   rifle: {
@@ -122,6 +123,8 @@ function buildRifleModel() {
   const mag = box(0.05, 0.16, 0.07, dark); mag.position.set(0, -0.12, 0.02); mag.rotation.x = 0.18; group.add(mag);
   const grip = box(0.05, 0.12, 0.05, polymer); grip.position.set(0, -0.11, 0.1); grip.rotation.x = -0.3; group.add(grip);
 
+  // One draw call per material instead of one per part (parts never move on their own).
+  mergeMeshesByMaterial(group);
   const muzzle = new THREE.Object3D();
   muzzle.position.set(0, 0.01, -0.44);
   group.add(muzzle);
@@ -150,6 +153,7 @@ function buildShotgunModel() {
   const band = box(0.088, 0.02, 0.03, red); band.position.set(0, 0.0, -0.14); group.add(band);
   const sight = box(0.02, 0.03, 0.02, dark); sight.position.set(0, 0.08, -0.5); group.add(sight);
 
+  mergeMeshesByMaterial(group);
   const muzzle = new THREE.Object3D();
   muzzle.position.set(0, 0.045, -0.7);
   group.add(muzzle);
