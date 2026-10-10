@@ -1,8 +1,8 @@
 /**
  * weapon.js
  * ------------------------------------------------------------------
- * Weapons: definitions, ammo bookkeeping, hitscan combat and the
- * first-person viewmodel (recoil, reload, switch and aim animation).
+ * Weapons: definitions, ammo bookkeeping, hitscan firearms, close-range
+ * melee swings and first-person viewmodels.
  *
  * Hitscan resolution:
  *   1. Build the shot direction from the camera basis (with spread).
@@ -22,6 +22,7 @@ import { mergeMeshesByMaterial } from './level.js';
 export const WEAPON_DEFS = {
   rifle: {
     id: 'rifle',
+    category: 'firearm',
     name: 'MX-7 ASSAULT RIFLE',
     slot: 1,
     damage: 24,
@@ -47,6 +48,7 @@ export const WEAPON_DEFS = {
   },
   shotgun: {
     id: 'shotgun',
+    category: 'firearm',
     name: 'HB-12 HELLBORE SHOTGUN',
     slot: 2,
     damage: 13,             // per pellet
@@ -70,11 +72,57 @@ export const WEAPON_DEFS = {
     tracer: false,
     sound: 'shotgun',
   },
+  knife: {
+    id: 'knife',
+    category: 'melee',
+    name: 'FIELD KNIFE',
+    slot: 3,
+    damage: 44,
+    reach: 1.65,
+    arcDegrees: 14,
+    rayCount: 1,
+    maxTargets: 1,
+    hitTime: 0.11,
+    attackDuration: 0.42,
+    attackCooldown: 0.48,
+    switchTime: 0.36,
+  },
+  pipe: {
+    id: 'pipe',
+    category: 'melee',
+    name: 'STEEL PIPE',
+    slot: 4,
+    damage: 52,
+    reach: 1.9,
+    arcDegrees: 42,
+    rayCount: 5,
+    maxTargets: 2,
+    hitTime: 0.2,
+    attackDuration: 0.62,
+    attackCooldown: 0.72,
+    switchTime: 0.4,
+  },
+  axe: {
+    id: 'axe',
+    category: 'melee',
+    name: 'FIRE AXE',
+    slot: 5,
+    damage: 95,
+    reach: 2.05,
+    arcDegrees: 30,
+    rayCount: 3,
+    maxTargets: 1,
+    hitTime: 0.31,
+    attackDuration: 0.94,
+    attackCooldown: 1.08,
+    switchTime: 0.48,
+  },
 };
 
-export const WEAPON_ORDER = ['rifle', 'shotgun'];
+/** Slot order is stable: rifle and shotgun keep their existing keys. */
+export const WEAPON_ORDER = ['rifle', 'shotgun', 'knife', 'pipe', 'axe'];
 
-/** Ammo granted by a pickup, per weapon. */
+/** Firearms only; melee weapons never consume or receive ammunition. */
 export const AMMO_PICKUP = { rifle: 45, shotgun: 10 };
 
 /** Per-weapon ammo state. */
@@ -84,11 +132,14 @@ class WeaponState {
     this.reset();
   }
   reset() {
-    this.ammo = this.def.magazineSize;
-    this.reserve = this.def.startReserve;
+    this.ammo = this.def.category === 'firearm' ? this.def.magazineSize : null;
+    this.reserve = this.def.category === 'firearm' ? this.def.startReserve : null;
     this.cooldown = 0;
     this.reloading = false;
     this.reloadTimer = 0;
+    this.attacking = false;
+    this.attackTimer = 0;
+    this.attackHit = false;
   }
 }
 
@@ -160,6 +211,87 @@ function buildShotgunModel() {
   return { group, muzzle, barrelLength: 0.7 };
 }
 
+function buildKnifeModel() {
+  const group = new THREE.Group();
+  const steel = mat(0x9caab5, { roughness: 0.28, metalness: 0.85 });
+  const grip = mat(0x202729, { roughness: 0.85, metalness: 0.05 });
+  const accent = mat(0xb32626, { roughness: 0.55, metalness: 0.1 });
+
+  group.add(box(0.052, 0.062, 0.17, grip));
+  const guard = box(0.13, 0.026, 0.04, steel);
+  guard.position.set(0, 0.015, 0.005);
+  group.add(guard);
+  const blade = box(0.052, 0.018, 0.22, steel);
+  blade.position.set(0, 0.032, -0.115);
+  group.add(blade);
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(0.03, 0.09, 4), steel);
+  tip.rotation.x = -Math.PI / 2;
+  tip.position.set(0, 0.032, -0.265);
+  group.add(tip);
+  const pommel = new THREE.Mesh(new THREE.CylinderGeometry(0.037, 0.037, 0.025, 8), accent);
+  pommel.rotation.x = Math.PI / 2;
+  pommel.position.set(0, 0, 0.105);
+  group.add(pommel);
+
+  mergeMeshesByMaterial(group);
+  return { group };
+}
+
+function buildPipeModel() {
+  const group = new THREE.Group();
+  const metal = mat(0x747c83, { roughness: 0.42, metalness: 0.78 });
+  const grip = mat(0x272321, { roughness: 0.9, metalness: 0.02 });
+  const tape = mat(0xb18b39, { roughness: 0.78, metalness: 0.05 });
+
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.031, 0.038, 0.57, 9), metal);
+  shaft.rotation.x = Math.PI / 2;
+  shaft.position.set(0, 0, -0.04);
+  group.add(shaft);
+  const handGrip = box(0.075, 0.075, 0.14, grip);
+  handGrip.position.set(0, 0, 0.13);
+  group.add(handGrip);
+  for (const z of [-0.31, 0.23]) {
+    const cap = new THREE.Mesh(new THREE.CylinderGeometry(0.043, 0.043, 0.035, 9), metal);
+    cap.rotation.x = Math.PI / 2;
+    cap.position.z = z;
+    group.add(cap);
+  }
+  const band = box(0.078, 0.08, 0.035, tape);
+  band.position.set(0, 0, 0.105);
+  group.add(band);
+
+  mergeMeshesByMaterial(group);
+  return { group };
+}
+
+function buildAxeModel() {
+  const group = new THREE.Group();
+  const steel = mat(0x9aa4ab, { roughness: 0.32, metalness: 0.82 });
+  const darkSteel = mat(0x363b3e, { roughness: 0.48, metalness: 0.72 });
+  const handle = mat(0x4d2c1d, { roughness: 0.8, metalness: 0.03 });
+  const red = mat(0xb32626, { roughness: 0.5, metalness: 0.15 });
+
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.024, 0.033, 0.58, 9), handle);
+  shaft.rotation.x = Math.PI / 2;
+  shaft.position.set(0.015, -0.01, 0.04);
+  group.add(shaft);
+  const grip = box(0.065, 0.075, 0.16, darkSteel);
+  grip.position.set(0.015, -0.01, 0.19);
+  group.add(grip);
+  const head = box(0.24, 0.17, 0.09, steel);
+  head.position.set(-0.09, 0.035, -0.215);
+  group.add(head);
+  const poll = box(0.11, 0.13, 0.1, darkSteel);
+  poll.position.set(0.055, 0.035, -0.215);
+  group.add(poll);
+  const warningStripe = box(0.12, 0.018, 0.095, red);
+  warningStripe.position.set(0.0, -0.025, 0.15);
+  group.add(warningStripe);
+
+  mergeMeshesByMaterial(group);
+  return { group };
+}
+
 /**
  * Damage multiplier for a hit at `distance` metres.
  * Full damage up to `falloff.start`, linear fall-off to `falloff.min` at `falloff.end`.
@@ -197,12 +329,18 @@ export class WeaponSystem {
     this.flashTimer = 0;
     this.shotCount = 0;
 
-    this.models = [buildRifleModel(), buildShotgunModel()];
+    this.models = [
+      buildRifleModel(),
+      buildShotgunModel(),
+      buildKnifeModel(),
+      buildPipeModel(),
+      buildAxeModel(),
+    ];
     for (const m of this.models) {
       m.group.visible = false;
       m.group.position.set(0.24, -0.24, -0.42);
       camera.add(m.group);
-      // Muzzle flash: additive sprite that is shown for a few frames.
+      if (!m.muzzle) continue; // Only firearms have muzzle-flash sprites.
       const flashMat = new THREE.SpriteMaterial({
         map: createGlowTexture('#ffb347'),
         color: 0xffc27a,
@@ -226,6 +364,8 @@ export class WeaponSystem {
     this._up = new THREE.Vector3();
     this._dir = new THREE.Vector3();
     this._muzzle = new THREE.Vector3();
+    this._rayOrigin = { x: 0, y: 0, z: 0 };
+    this._rayDirection = { x: 0, y: 0, z: -1 };
   }
 
   get state() {
@@ -244,14 +384,24 @@ export class WeaponSystem {
     this.aimAmount = 0;
     this.viewKick = 0;
     this.flashTimer = 0;
-    this.models.forEach((m, i) => (m.group.visible = i === 0));
+    this.models.forEach((m, i) => {
+      m.group.visible = i === 0;
+      if (m.flash) {
+        m.flash.visible = false;
+        m.flash.material.opacity = 0;
+      }
+    });
   }
 
-  /** Switches weapon by slot index (0 = rifle, 1 = shotgun). Cancels any reload. */
+  /** Switches by slot index; firearms keep slots 1-2 and melee uses slots 3-5. */
   requestSwitch(index) {
     if (index < 0 || index >= this.states.length || index === this.index) return false;
     const old = this.state;
     old.reloading = false;
+    old.attacking = false;
+    old.attackTimer = 0;
+    old.attackHit = false;
+    this.flashTimer = 0;
     this.models[this.index].group.visible = false;
     this.index = index;
     this.models[index].group.visible = true;
@@ -264,7 +414,7 @@ export class WeaponSystem {
   /** Begins a reload if possible. Returns true if a reload started. */
   startReload() {
     const st = this.state;
-    if (this.switchTimer > 0 || st.reloading) return false;
+    if (st.def.category !== 'firearm' || this.switchTimer > 0 || st.reloading) return false;
     if (st.ammo >= st.def.magazineSize) return false;
     if (st.reserve <= 0) {
       this.hooks.onMessage?.('NO RESERVE AMMO');
@@ -302,14 +452,37 @@ export class WeaponSystem {
     }
   }
 
-  /** True when at least one weapon has room for reserve ammo. */
+  /** True when a firearm has room for reserve ammo. Melee is inexhaustible. */
   needsAmmo() {
-    return this.states.some((st) => st.reserve < st.def.maxReserve);
+    return this.states.some((st) =>
+      st.def.category === 'firearm' && st.reserve < st.def.maxReserve);
   }
 
   /** Shows or hides the viewmodel (hidden in menus and after death). */
   setVisible(visible) {
     this.models.forEach((m, i) => (m.group.visible = visible && i === this.index));
+  }
+
+  /** Releases procedural viewmodel GPU resources when the game is disposed. */
+  dispose() {
+    const geometries = new Set();
+    const materials = new Set();
+    const textures = new Set();
+    for (const model of this.models) {
+      this.camera.remove(model.group);
+      model.group.traverse((object) => {
+        if (object.geometry) geometries.add(object.geometry);
+        if (!object.material) return;
+        const list = Array.isArray(object.material) ? object.material : [object.material];
+        for (const material of list) {
+          materials.add(material);
+          if (material.map) textures.add(material.map);
+        }
+      });
+    }
+    for (const geometry of geometries) geometry.dispose();
+    for (const texture of textures) texture.dispose();
+    for (const material of materials) material.dispose();
   }
 
   /**
@@ -318,12 +491,13 @@ export class WeaponSystem {
    */
   addAmmo() {
     let added = false;
-    this.states.forEach((st, i) => {
-      const amount = AMMO_PICKUP[WEAPON_ORDER[i]];
+    for (const st of this.states) {
+      if (st.def.category !== 'firearm') continue;
+      const amount = AMMO_PICKUP[st.def.id];
       const before = st.reserve;
       st.reserve = Math.min(st.def.maxReserve, st.reserve + amount);
       if (st.reserve > before) added = true;
-    });
+    }
     return added;
   }
 
@@ -333,13 +507,16 @@ export class WeaponSystem {
    */
   update(dt, input, ctx) {
     const st = this.state;
+    const isMelee = st.def.category === 'melee';
     st.cooldown = Math.max(0, st.cooldown - dt);
     this.switchTimer = Math.max(0, this.switchTimer - dt);
-    this.bloom *= Math.exp(-st.def.bloomDecay * dt);
-    this.flashTimer = Math.max(0, this.flashTimer - dt);
     this.viewKick *= Math.exp(-14 * dt);
+    if (!isMelee) {
+      this.bloom *= Math.exp(-st.def.bloomDecay * dt);
+      this.flashTimer = Math.max(0, this.flashTimer - dt);
+    }
 
-    const aiming = !!input.aim && ctx.canFire;
+    const aiming = !isMelee && !!input.aim && ctx.canFire;
     this.aimAmount += ((aiming ? 1 : 0) - this.aimAmount) * Math.min(1, dt * 12);
 
     if (st.reloading) {
@@ -347,7 +524,28 @@ export class WeaponSystem {
       if (st.reloadTimer <= 0) this.completeReloadStep();
     }
 
-    if (ctx.canFire) {
+    if (isMelee) {
+      if (!ctx.canFire) {
+        st.attacking = false;
+        st.attackTimer = 0;
+        st.attackHit = false;
+      } else {
+        if (st.attacking) {
+          st.attackTimer = Math.min(st.def.attackDuration, st.attackTimer + dt);
+          if (!st.attackHit && st.attackTimer >= st.def.hitTime) {
+            st.attackHit = true;
+            this.resolveMeleeAttack(st.def, ctx);
+          }
+          if (st.attackTimer >= st.def.attackDuration) {
+            st.attacking = false;
+            st.attackTimer = 0;
+            st.attackHit = false;
+          }
+        }
+        // Melee is edge-triggered: holding the mouse never repeats a swing.
+        if (input.firePressed) this.tryMeleeAttack();
+      }
+    } else if (ctx.canFire) {
       if (input.reloadPressed) this.startReload();
       const wantsFire = st.def.auto ? input.fireHeld : input.firePressed;
       if (wantsFire) this.tryFire(ctx);
@@ -357,10 +555,82 @@ export class WeaponSystem {
     this.updateMuzzleFlash();
   }
 
+  /** Starts one melee swing; damage is applied once on its animated hit frame. */
+  tryMeleeAttack() {
+    const st = this.state;
+    if (st.def.category !== 'melee' || this.switchTimer > 0 || st.cooldown > 0 || st.attacking) return false;
+    st.attacking = true;
+    st.attackTimer = 0;
+    st.attackHit = false;
+    st.cooldown = st.def.attackCooldown;
+    this.audio.playMeleeSwing(st.def.id);
+    return true;
+  }
+
+  /** Applies a short forward fan of melee rays, stopped by the first world collider. */
+  resolveMeleeAttack(def, ctx) {
+    const hitboxes = ctx.hitboxes();
+    if (hitboxes.length === 0) return;
+
+    const cam = this.camera;
+    cam.updateMatrixWorld(true);
+    const origin = this._origin.setFromMatrixPosition(cam.matrixWorld);
+    const forward = cam.getWorldDirection(this._forward);
+    const originData = this._rayOrigin;
+    originData.x = origin.x;
+    originData.y = origin.y;
+    originData.z = origin.z;
+
+    const seen = new Set();
+    const arc = THREE.MathUtils.degToRad(def.arcDegrees);
+    const count = Math.max(1, def.rayCount);
+    for (let i = 0; i < count && seen.size < def.maxTargets; i++) {
+      const angle = count === 1 ? 0 : (i / (count - 1) - 0.5) * arc;
+      const c = Math.cos(angle);
+      const s = Math.sin(angle);
+      const dir = this._dir.set(
+        forward.x * c + forward.z * s,
+        forward.y,
+        -forward.x * s + forward.z * c,
+      ).normalize();
+      const rayDir = this._rayDirection;
+      rayDir.x = dir.x;
+      rayDir.y = dir.y;
+      rayDir.z = dir.z;
+
+      const blocker = raycastBoxes(originData, rayDir, def.reach, ctx.colliders);
+      this.raycaster.set(origin, dir);
+      // Keep a tiny gap before a wall so a target on its far side cannot be hit.
+      this.raycaster.far = blocker ? Math.max(0, blocker.distance - 0.02) : def.reach;
+      if (this.raycaster.far <= 0) continue;
+
+      const hits = this.raycaster.intersectObjects(hitboxes, false);
+      for (const hit of hits) {
+        const enemy = hit.object.userData.enemy;
+        if (!enemy || !enemy.isTargetable() || seen.has(enemy)) continue;
+        seen.add(enemy);
+        const point = hit.point.clone();
+        const normal = { x: -dir.x, y: -dir.y, z: -dir.z };
+        const outcome = this.hooks.onEnemyHit?.({
+          enemy,
+          damage: def.damage,
+          headshot: false,
+          point,
+          distance: hit.distance,
+          weapon: def.id,
+        });
+        this.effects.spawnBlood(point, normal, 1.1);
+        this.audio.playHitFlesh(false);
+        if (outcome?.killed) this.effects.spawnBlood(point, normal, 2);
+        break; // One target per ray; `seen` also prevents multi-ray double hits.
+      }
+    }
+  }
+
   /** Fires if the weapon is ready. Returns true when a shot was taken. */
   tryFire(ctx) {
     const st = this.state;
-    if (this.switchTimer > 0 || st.cooldown > 0) return false;
+    if (st.def.category !== 'firearm' || this.switchTimer > 0 || st.cooldown > 0) return false;
     if (st.ammo <= 0) {
       st.cooldown = 0.3;
       this.audio.playDryFire();
@@ -530,16 +800,43 @@ export class WeaponSystem {
     };
   }
 
-  /** Viewmodel placement: hip/ADS position, switch dip, reload dip, recoil, bob. */
+  /** Viewmodel placement and attack animation for firearms and melee. */
   updateViewmodel(ctx) {
     const st = this.state;
     const model = this.models[this.index];
-    const aim = this.aimAmount;
     const switchT = this.switchTimer > 0 ? this.switchTimer / st.def.switchTime : 0;
+    const bob = Math.sin(ctx.bobPhase || 0) * 0.012 * (ctx.speedFactor || 0);
+    const g = model.group;
+
+    if (st.def.category === 'melee') {
+      const phase = st.attacking ? Math.min(1, st.attackTimer / st.def.attackDuration) : 0;
+      const swing = st.attacking ? Math.sin(Math.PI * phase) : 0;
+      const dip = switchT * 0.35;
+      g.position.x = 0.28 + bob * 0.5;
+      g.position.y = -0.24 - dip + Math.abs(bob);
+      g.position.z = -0.4 + swing * (st.def.id === 'axe' ? 0.04 : 0.025);
+
+      if (st.def.id === 'knife') {
+        g.rotation.x = -0.2 - swing * 0.7 + switchT * 0.45;
+        g.rotation.y = 0.12 - swing * 0.35;
+        g.rotation.z = 0.22 + swing * 1.05 - bob * 2;
+      } else if (st.def.id === 'pipe') {
+        g.rotation.x = -0.1 - swing * 0.35 + switchT * 0.45;
+        g.rotation.y = swing * 0.15;
+        g.rotation.z = -0.12 - swing * 1.2 - bob * 2;
+      } else {
+        // A heavier overhead chop, with a longer wind-up and follow-through.
+        g.rotation.x = -0.28 - swing * 1.25 + switchT * 0.45;
+        g.rotation.y = -0.08 + swing * 0.2;
+        g.rotation.z = 0.16 + swing * 0.4 - bob * 2;
+        g.position.y -= swing * 0.07;
+      }
+      return;
+    }
+
+    const aim = this.aimAmount;
     const reloadPhase = st.reloading ? 1 - st.reloadTimer / st.def.reloadTime : 0;
     const reloadT = st.reloading ? Math.sin(Math.PI * Math.min(1, reloadPhase)) : 0;
-    const bob = Math.sin(ctx.bobPhase || 0) * 0.012 * (ctx.speedFactor || 0);
-
     const hipX = st.def.id === 'shotgun' ? 0.26 : 0.24;
     const hipY = -0.24;
     const hipZ = -0.42;
@@ -547,7 +844,6 @@ export class WeaponSystem {
     const adsY = -0.175;
     const adsZ = -0.3;
 
-    const g = model.group;
     g.position.x = hipX + (adsX - hipX) * aim + bob * 0.5;
     g.position.y = hipY + (adsY - hipY) * aim - switchT * 0.35 - reloadT * 0.13 + Math.abs(bob);
     g.position.z = hipZ + (adsZ - hipZ) * aim + this.viewKick * 0.12;
@@ -558,6 +854,7 @@ export class WeaponSystem {
 
   updateMuzzleFlash() {
     const m = this.models[this.index];
+    if (!m.flash) return;
     if (this.flashTimer > 0) {
       m.flash.material.opacity = 1;
       m.flash.visible = true;
@@ -570,13 +867,17 @@ export class WeaponSystem {
   /** HUD snapshot. */
   getHudData() {
     const st = this.state;
+    const hasAmmo = st.def.category === 'firearm';
     return {
       name: st.def.name,
       ammo: st.ammo,
       reserve: st.reserve,
+      hasAmmo,
+      melee: !hasAmmo,
+      attacking: st.attacking,
       reloading: st.reloading,
       switching: this.switchTimer > 0,
-      slot: this.index + 1,
+      slot: st.def.slot,
       auto: st.def.auto,
     };
   }

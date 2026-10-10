@@ -215,7 +215,7 @@ export class Game {
     };
     for (const m of this.weapons.models) {
       reveal(m.group);
-      reveal(m.flash);
+      if (m.flash) reveal(m.flash);
     }
     for (const t of this.effects.tracers) reveal(t.line);
     reveal(this.effects.holes.mesh);
@@ -638,9 +638,12 @@ export class Game {
       }
     }
 
-    // Weapons: switching, reload, fire (raycasts use this frame's hitboxes).
-    if (input.wasPressed('Digit1') || input.wasPressed('Numpad1')) this.weapons.requestSwitch(0);
-    if (input.wasPressed('Digit2') || input.wasPressed('Numpad2')) this.weapons.requestSwitch(1);
+    // Weapons: 1-2 remain firearms; 3-5 select the melee loadout.
+    for (let slot = 1; slot <= 5; slot++) {
+      if (input.wasPressed(`Digit${slot}`) || input.wasPressed(`Numpad${slot}`)) {
+        this.weapons.requestSwitch(slot - 1);
+      }
+    }
     this.weapons.update(
       dt,
       {
@@ -813,6 +816,7 @@ export class Game {
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.input?.dispose();
     this.clearWorld();
+    this.weapons?.dispose();
     this.effects?.dispose();
     this.level?.dispose();
     this.audio?.dispose();
