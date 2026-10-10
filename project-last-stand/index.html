@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="PROJECT: LAST STAND - a dark sci-fi first-person survival shooter built with Three.js." />
+  <title>PROJECT: LAST STAND</title>
+  <link rel="stylesheet" href="style.css" />
+  <!-- Three.js is resolved from node_modules (installed with `npm install`). -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "/node_modules/three/build/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <noscript>
+    <div class="fatal-box">
+      <h2>JavaScript is required</h2>
+      <p>PROJECT: LAST STAND needs JavaScript and WebGL. Please enable JavaScript and reload the page.</p>
+    </div>
+  </noscript>
+
+  <!-- 3D view -->
+  <canvas id="game-canvas" aria-label="First-person 3D view of the facility"></canvas>
+
+  <!-- Screen-space feedback -->
+  <div id="flash-damage" class="flash-damage" aria-hidden="true"></div>
+  <div id="low-health" class="low-health" aria-hidden="true"></div>
+  <div id="damage-indicator" class="damage-indicator" aria-hidden="true"><span></span></div>
+
+  <!-- In-game HUD -->
+  <div id="hud" class="hud hidden" aria-hidden="true">
+    <div class="hud-top-left">
+      <div class="hud-label">WAVE</div>
+      <div class="hud-wave" id="hud-wave">0</div>
+      <div class="hud-sub">HOSTILES <strong id="hud-remaining">0</strong></div>
+      <div class="hud-phase" id="hud-phase"></div>
+    </div>
+
+    <div class="hud-top-right">
+      <div class="hud-row"><span>SCORE</span><strong id="hud-score">0</strong></div>
+      <div class="hud-row"><span>KILLS</span><strong id="hud-kills">0</strong></div>
+    </div>
+
+    <div class="crosshair" id="crosshair" aria-hidden="true">
+      <span class="ch ch-top"></span>
+      <span class="ch ch-bottom"></span>
+      <span class="ch ch-left"></span>
+      <span class="ch ch-right"></span>
+      <span class="ch-dot"></span>
+    </div>
+    <div class="hitmarker" id="hitmarker" aria-hidden="true">
+      <span></span><span></span><span></span><span></span>
+    </div>
+
+    <div class="hud-bottom-left">
+      <div class="health-label">HEALTH <span id="hud-health-text">100 / 100</span></div>
+      <div class="health-bar"><div class="health-fill" id="hud-health-fill"></div></div>
+    </div>
+
+    <div class="hud-bottom-right">
+      <div class="weapon-name" id="hud-weapon">MX-7 ASSAULT RIFLE</div>
+      <div class="ammo"><span id="hud-ammo">30</span><span class="ammo-reserve">/ <span id="hud-reserve">120</span></span></div>
+      <div class="weapon-status" id="hud-status"></div>
+      <div class="slots"><span data-slot="1" class="slot">1 RIFLE</span><span data-slot="2" class="slot">2 SHOTGUN</span></div>
+    </div>
+
+    <div class="banner" id="banner" aria-live="polite">
+      <div class="banner-title" id="banner-title"></div>
+      <div class="banner-sub" id="banner-sub"></div>
+    </div>
+    <div class="countdown" id="countdown" aria-live="polite"></div>
+    <div class="toasts" id="toasts" aria-live="polite"></div>
+  </div>
+
+  <!-- Main menu -->
+  <section class="screen" id="screen-menu" data-screen="menu" aria-label="Main menu">
+    <div class="menu-wrap panel">
+      <div class="logo">
+        <div class="logo-kicker">ABANDONED RESEARCH FACILITY // SECTOR 7</div>
+        <h1 class="logo-title">PROJECT<span class="logo-colon">:</span> LAST STAND</h1>
+        <div class="logo-rule"></div>
+      </div>
+      <nav class="menu-buttons" aria-label="Main menu buttons">
+        <button class="btn btn-primary" id="btn-play" type="button">PLAY</button>
+        <button class="btn" id="btn-settings" type="button">SETTINGS</button>
+        <button class="btn" id="btn-controls" type="button">CONTROLS</button>
+        <button class="btn" id="btn-credits" type="button">CREDITS</button>
+      </nav>
+      <div class="record-panel">
+        <div class="record"><span>BEST SCORE</span><strong id="menu-high-score">0</strong></div>
+        <div class="record"><span>HIGHEST WAVE</span><strong id="menu-high-wave">0</strong></div>
+      </div>
+      <p class="menu-hint">Click PLAY to capture the mouse. Navigate with the arrow keys and Enter.</p>
+    </div>
+  </section>
+
+  <!-- Settings (reachable from main menu and pause menu) -->
+  <section class="screen hidden" id="screen-settings" data-screen="settings" aria-label="Settings">
+    <div class="panel sub-panel">
+      <h2 class="screen-title">SETTINGS</h2>
+      <div class="settings-grid">
+        <label class="setting">
+          <span class="setting-name">Mouse sensitivity</span>
+          <input type="range" id="set-sensitivity" min="0.2" max="3" step="0.05" />
+          <output id="out-sensitivity">1.00</output>
+        </label>
+        <label class="setting">
+          <span class="setting-name">Field of view</span>
+          <input type="range" id="set-fov" min="60" max="100" step="1" />
+          <output id="out-fov">75</output>
+        </label>
+        <label class="setting">
+          <span class="setting-name">Master volume</span>
+          <input type="range" id="set-volume" min="0" max="100" step="1" />
+          <output id="out-volume">80%</output>
+        </label>
+        <label class="setting setting-toggle">
+          <span class="setting-name">Invert mouse Y</span>
+          <input type="checkbox" id="set-invert" />
+        </label>
+        <label class="setting setting-toggle">
+          <span class="setting-name">Dynamic shadows</span>
+          <input type="checkbox" id="set-shadows" />
+        </label>
+        <label class="setting setting-toggle">
+          <span class="setting-name">Screen shake</span>
+          <input type="checkbox" id="set-shake" />
+        </label>
+      </div>
+      <p class="setting-note">Settings are saved automatically in this browser.</p>
+      <div class="button-row">
+        <button class="btn" id="btn-settings-reset" type="button">RESET DEFAULTS</button>
+        <button class="btn btn-primary" id="btn-settings-back" type="button">BACK</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Controls -->
+  <section class="screen hidden" id="screen-controls" data-screen="controls" aria-label="Controls">
+    <div class="panel sub-panel">
+      <h2 class="screen-title">CONTROLS</h2>
+      <table class="controls-table">
+        <tbody>
+          <tr><th>W A S D</th><td>Move</td></tr>
+          <tr><th>Mouse</th><td>Look around</td></tr>
+          <tr><th>Left click</th><td>Fire (hold for automatic weapons)</td></tr>
+          <tr><th>Right click</th><td>Aim down sights</td></tr>
+          <tr><th>R</th><td>Reload</td></tr>
+          <tr><th>Shift</th><td>Sprint (forward)</td></tr>
+          <tr><th>Space</th><td>Jump</td></tr>
+          <tr><th>1 / 2</th><td>Switch weapon</td></tr>
+          <tr><th>Esc</th><td>Pause / release mouse</td></tr>
+        </tbody>
+      </table>
+      <div class="button-row">
+        <button class="btn btn-primary" id="btn-controls-back" type="button">BACK</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Credits -->
+  <section class="screen hidden" id="screen-credits" data-screen="credits" aria-label="Credits">
+    <div class="panel sub-panel">
+      <h2 class="screen-title">CREDITS</h2>
+      <div class="credits">
+        <p class="credit-role">Design &amp; Code</p>
+        <p>Project: Last Stand</p>
+        <p class="credit-role">Rendering</p>
+        <p>Three.js (MIT License) - real-time 3D, lights and shadows</p>
+        <p class="credit-role">Audio</p>
+        <p>Synthesised live with the Web Audio API</p>
+        <p class="credit-role">Textures &amp; models</p>
+        <p>Procedurally generated with canvas and Three.js geometry</p>
+      </div>
+      <div class="button-row">
+        <button class="btn btn-primary" id="btn-credits-back" type="button">BACK</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Pause -->
+  <section class="screen hidden" id="screen-pause" data-screen="pause" aria-label="Paused">
+    <div class="panel sub-panel pause-panel">
+      <h2 class="screen-title">PAUSED</h2>
+      <p class="pause-note" id="pause-note">The facility is quiet. For now.</p>
+      <nav class="menu-buttons" aria-label="Pause menu">
+        <button class="btn btn-primary" id="btn-resume" type="button">RESUME</button>
+        <button class="btn" id="btn-restart" type="button">RESTART GAME</button>
+        <button class="btn" id="btn-pause-settings" type="button">SETTINGS</button>
+        <button class="btn" id="btn-main-menu-pause" type="button">MAIN MENU</button>
+      </nav>
+    </div>
+  </section>
+
+  <!-- Game over -->
+  <section class="screen hidden" id="screen-gameover" data-screen="gameover" aria-label="Game over">
+    <div class="panel sub-panel gameover-panel">
+      <h2 class="screen-title danger">YOU DIED</h2>
+      <div class="stats">
+        <div class="stat"><span>FINAL SCORE</span><strong id="go-score">0</strong></div>
+        <div class="stat"><span>TOTAL KILLS</span><strong id="go-kills">0</strong></div>
+        <div class="stat"><span>HIGHEST WAVE</span><strong id="go-wave">0</strong></div>
+        <div class="stat"><span>HEADSHOTS</span><strong id="go-headshots">0</strong></div>
+      </div>
+      <p class="pause-note" id="go-record">&nbsp;</p>
+      <nav class="menu-buttons" aria-label="Game over menu">
+        <button class="btn btn-primary" id="btn-retry" type="button">RETRY</button>
+        <button class="btn" id="btn-main-menu-over" type="button">MAIN MENU</button>
+      </nav>
+    </div>
+  </section>
+
+  <!-- Loading -->
+  <section class="screen hidden" id="screen-loading" data-screen="loading" aria-label="Loading">
+    <div class="loading">
+      <div class="loading-bar"><span></span></div>
+      <p id="loading-text">Initialising facility systems...</p>
+    </div>
+  </section>
+
+  <!-- Fatal error panel (filled by main.js) -->
+  <div id="fatal-error" class="fatal-box hidden" role="alert">
+    <h2>Unable to start</h2>
+    <p id="fatal-text"></p>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
