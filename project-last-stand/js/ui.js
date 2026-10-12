@@ -198,6 +198,57 @@ export class UI {
     delete this.lastHud.slot;
   }
 
+  /**
+   * Fills the loadout screen: one select per key, listing the weapons that fit
+   * that slot. The rows are only rebuilt when the offered options change, so
+   * writing a rejected (duplicate) loadout back does not steal focus.
+   *
+   * @param {string[]} loadout  weapon id per key
+   * @param {Array<{index:number,name:string,options:Array<{id:string,name:string}>}>} slots
+   */
+  writeLoadoutControls(loadout, slots = []) {
+    const grid = this.el['loadout-grid'];
+    if (!grid || slots.length === 0) return;
+    const signature = slots.map((slot) => slot.options.map((option) => option.id).join('|')).join(';');
+    if (grid.dataset.options !== signature) {
+      grid.textContent = '';
+      for (const slot of slots) {
+        const row = this.root.createElement('label');
+        row.className = 'setting loadout-row';
+        const name = this.root.createElement('span');
+        name.className = 'setting-name';
+        name.textContent = slot.name;
+        const select = this.root.createElement('select');
+        select.className = 'loadout-select';
+        select.dataset.loadoutSlot = String(slot.index);
+        for (const option of slot.options) {
+          const el = this.root.createElement('option');
+          el.value = option.id;
+          // Weapons that unlock later are listed but flagged, so the screen
+          // stays honest about what a fresh save can actually pick.
+          el.textContent = option.unlockWave > 1 ? `${option.name} (WAVE ${option.unlockWave})` : option.name;
+          select.appendChild(el);
+        }
+        row.appendChild(name);
+        row.appendChild(select);
+        grid.appendChild(row);
+      }
+      grid.dataset.options = signature;
+    }
+    for (const select of grid.querySelectorAll('[data-loadout-slot]')) {
+      select.value = loadout[Number(select.dataset.loadoutSlot)] ?? select.value;
+    }
+  }
+
+  /** Reads the five selects back into a weapon id per key. */
+  readLoadoutControls() {
+    const grid = this.el['loadout-grid'];
+    if (!grid) return [];
+    return Array.from(grid.querySelectorAll('[data-loadout-slot]'))
+      .sort((a, b) => Number(a.dataset.loadoutSlot) - Number(b.dataset.loadoutSlot))
+      .map((select) => select.value);
+  }
+
   /** Sets menu records from storage. */
   setRecords({ highScore, highWave }) {
     this.setText(this.el['menu-high-score'], highScore.toLocaleString());

@@ -265,7 +265,10 @@ export class Game {
         o.visible = true;
       }
     };
-    for (const m of this.weapons.models) {
+    // Every viewmodel, not just the carried ones: the loadout screen can put
+    // any gun in a slot, and nothing here should recompile mid-run.
+    for (const m of this.weapons.viewmodels.values()) {
+      if (!m) continue;
       reveal(m.group);
       if (m.flash) reveal(m.flash);
     }

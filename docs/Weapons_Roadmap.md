@@ -1,8 +1,12 @@
 # Weapons roadmap — more guns for PROJECT: LAST STAND
 
-Status: **design / not started**. Covers new firearms, new melee, throwables and
-the systems they need. Today the game ships 5 weapons: MX-7 rifle, HB-12
-shotgun, field knife, steel pipe, fire axe (`js/weapon.js` → `WEAPON_DEFS`).
+Status: **milestones 0–2 landed** (schema + validation, loadouts, S-9 VIPER and
+MKR-1 MARKSMAN). See "Implementation notes" at the bottom for the numbers that
+were actually shipped and where they deviate from this document. Milestones 3–6
+(projectiles, melee + pistol, ammo kinds, LMG + attachments) are still design.
+Covers new firearms, new melee, throwables and the systems they need. Today the
+game ships 7 weapons: MX-7 rifle, HB-12 shotgun, S-9 SMG, MKR-1 marksman, field
+knife, steel pipe, fire axe (`js/weapon.js` → `WEAPON_DEFS`).
 
 ---
 
@@ -188,3 +192,44 @@ is the largest single chunk of new code and should land before the mode work in
 | Explosives tank the frame rate | One pooled `InstancedMesh`, particle budget shared with `EffectsManager`, cap 8 live projectiles |
 | Viewmodel authoring cost per gun | Write a small parametric builder (body/receiver/mag/stock/grip primitives) instead of hand-built geometry per weapon |
 | Multiplayer desync from new weapons | Everything new goes through the sim event bus designed in `Multiplayer_Plan.md` §4 — do **not** land projectiles before that refactor if multiplayer is next |
+
+---
+
+## 7. Implementation notes (milestones 0–2, shipped)
+
+Milestone 0 — `js/weapon.js` exports `validateWeaponDef(def, allDefs?, loadout?)`,
+`validateWeaponDefs()`, `SLOT_COUNT`, `SLOT_CATEGORIES`, `DEFAULT_LOADOUT`,
+`WEAPON_IDS`, `AMMO_KINDS`, `sanitizeLoadout()`, `hudSlotLabels()`,
+`loadoutSlotOptions()`, `magazineCycleTime()`, `magazineDamage()` and
+`sustainedDps()`. Every def carries `shortName`, `unlockWave`,
+`moveSpeedMult` and (firearms only) `ammoKind` / `adsZoom` / `penetration`.
+`slot` is the *default* slot: two weapons may declare the same one (rifle and
+SMG both default to 1), so uniqueness is only enforced inside the default
+loadout. `unlockWave`, `moveSpeedMult` and `adsZoom` are inert until the waves,
+LMG and attachment work lands.
+
+Milestone 2 — slots are data: `loadout[i]` answers key `i + 1`. `Game.setLoadout()`
+sanitizes, rebuilds the slots, repaints the HUD chips and saves it next to the
+settings (`storage.js`). The LOADOUT screen builds its selects from
+`WEAPON_DEFS`, and `?weapons=smg,dmr` overrides slots 1–2 for one session.
+
+Milestone 1 — the shipped numbers (deviations from §2.1 in brackets):
+
+| id | Damage | Rate | Mag | Reserve | Reload | Switch | Spread / bloom | Sustained DPS |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `smg` | 15 (head ×1.6) | 14/s auto | 35 | 210 / 420 | 1.6 s | 0.3 s | 0.014 → 0.055 | 128 |
+| `dmr` | 68 (head ×2.5) | 2.2/s semi | 12 | 72 / 144 | 2.4 s | 0.65 s | 0.0035 → 0.02 | 104 |
+
+- The SMG gained a mild falloff (`16 m → 45 m, min 0.5`) and range 70 to make it
+  a close–mid weapon rather than a worse rifle, and a ×1.6 headshot bonus.
+- The DMR has `falloff: null` (the document implies no distance loss), range 200
+  and `penetration: 1`; penetrated bodies take `PENETRATION_DAMAGE_MULT` (0.6)
+  of the damage, compounding, and the wall behind them still takes the decal.
+- Both use `ammoKind: 'rifle'` while the ammo-kind *pickups* of milestone 5 do
+  not exist yet; `AMMO_PICKUP` has `smg: 90`, `dmr: 24`.
+- Viewmodels come from `buildParametricFirearm(spec)` (receiver/barrel/magazine/
+  stock/grip/rail/sight primitives, merged per material). Every viewmodel is
+  built once per `WeaponSystem` and `prewarmShaders()` compiles all of them, so
+  swapping a loadout in the menu never compiles a shader mid-run.
+- Audio is table-driven: `SHOT_PROFILES[def.sound]` (noise layers + body blip)
+  in `js/audio.js`; the rifle and shotgun rows are byte-for-byte the old sounds.

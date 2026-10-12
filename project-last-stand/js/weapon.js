@@ -90,6 +90,69 @@ export const WEAPON_DEFS = {
     tracer: false,
     sound: 'shotgun',
   },
+  smg: {
+    id: 'smg',
+    category: 'firearm',
+    name: 'S-9 VIPER SMG',
+    shortName: 'SMG',
+    slot: 1,                 // shares slot 1 with the rifle: both are "the close one"
+    ammoKind: 'rifle',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 1.15,
+    damage: 15,
+    headshotMultiplier: 1.6, // less rewarding than a rifle round: it is a spray gun
+    fireRate: 14,
+    auto: true,
+    magazineSize: 35,
+    startReserve: 210,
+    maxReserve: 420,
+    reloadTime: 1.6,
+    reloadMode: 'magazine',
+    switchTime: 0.3,         // fastest draw in the game
+    pellets: 1,
+    spread: 0.014,
+    bloomPerShot: 0.006,     // heavy bloom: the first rounds are the accurate ones
+    maxBloom: 0.055,
+    bloomDecay: 4.5,
+    range: 70,
+    falloff: { start: 16, end: 45, min: 0.5 }, // close-mid weapon: half damage past 45 m
+    recoil: { pitch: 0.008, yaw: 0.005, kick: 0.03, trauma: 0.1 },
+    tracer: true,
+    sound: 'smg',
+  },
+  dmr: {
+    id: 'dmr',
+    category: 'firearm',
+    name: 'MKR-1 MARKSMAN',
+    shortName: 'MARKSMAN',
+    slot: 2,                 // the long-range alternative to the shotgun
+    ammoKind: 'rifle',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 2.2,
+    damage: 68,
+    headshotMultiplier: 2.5,
+    fireRate: 2.2,
+    auto: false,
+    magazineSize: 12,
+    startReserve: 72,
+    maxReserve: 144,
+    reloadTime: 2.4,
+    reloadMode: 'magazine',
+    switchTime: 0.65,
+    pellets: 1,
+    spread: 0.0035,
+    bloomPerShot: 0.006,
+    maxBloom: 0.02,
+    bloomDecay: 6,
+    range: 200,              // long lanes across the whole facility
+    falloff: null,           // a marksman round does not care about distance
+    penetration: 1,          // keeps going through one body at 60% damage
+    recoil: { pitch: 0.03, yaw: 0.006, kick: 0.08, trauma: 0.3 },
+    tracer: true,
+    sound: 'dmr',
+  },
   knife: {
     id: 'knife',
     category: 'melee',
@@ -178,7 +241,12 @@ export const SLOT_CATEGORIES = Object.freeze(['firearm', 'firearm', 'melee', 'me
 export const DEFAULT_LOADOUT = Object.freeze([...WEAPON_ORDER]);
 
 /** Firearms only; melee weapons never consume or receive ammunition. */
-export const AMMO_PICKUP = { rifle: 45, shotgun: 10 };
+export const AMMO_PICKUP = {
+  rifle: 45,
+  shotgun: 10,
+  smg: 90,     // cheap, small rounds: pickups top the Viper up quickly
+  dmr: 24,     // marksman rounds are the reason the DMR is not the default gun
+};
 
 /** Every weapon that can be picked in a loadout, in catalogue order. */
 export const WEAPON_IDS = Object.freeze(Object.keys(WEAPON_DEFS));
@@ -591,6 +659,111 @@ function buildAxeModel() {
 }
 
 /**
+ * Parametric firearm viewmodel.
+ *
+ * The rifle and shotgun were hand-placed part by part; every gun after them is
+ * a spec table for this builder instead: a receiver plus optional primitives
+ * (barrel, handguard, magazine, stock, grip, rail, sight, accents) described as
+ * plain numbers. Parts are merged per material like the hand-built models, so a
+ * gun with 15 primitives is still a handful of draw calls.
+ *
+ * @param {object} spec
+ * @param {object} spec.colors            {body, frame, accent} hex colours
+ * @param {object} spec.receiver          {w,h,d,x?,y?,z?} main body box
+ * @param {Array}  [spec.barrels]         cylinders along -Z: {r0,r1,len,x?,y?,z?,color?}
+ *                                        (r0 = radius at the receiver, r1 = at the muzzle)
+ * @param {Array}  [spec.boxes]           extra boxes: {w,h,d,x?,y?,z?,rx?,rz?,color?}
+ * @param {object} [spec.muzzle]          {x?,y?,z?} muzzle marker; the flash sprite hangs on it
+ * @returns {{group: THREE.Group, muzzle: THREE.Object3D, barrelLength: number}}
+ */
+function buildParametricFirearm(spec) {
+  const group = new THREE.Group();
+  const colors = { body: 0x23282f, frame: 0x1a1d21, accent: 0xb71c1c, ...spec.colors };
+  const materials = {
+    body: mat(colors.body, { roughness: 0.45, metalness: 0.7 }),
+    frame: mat(colors.frame, { roughness: 0.85, metalness: 0.05 }),
+    accent: mat(colors.accent, { roughness: 0.45, metalness: 0.25 }),
+  };
+
+  const rec = spec.receiver;
+  const body = box(rec.w, rec.h, rec.d, materials.body);
+  body.position.set(rec.x || 0, rec.y || 0, rec.z || 0);
+  group.add(body);
+
+  for (const b of spec.barrels || []) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(b.r0, b.r1, b.len, 10), materials[b.color || 'body']);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(b.x || 0, b.y || 0, b.z || 0);
+    group.add(barrel);
+  }
+  for (const p of spec.boxes || []) {
+    const part = box(p.w, p.h, p.d, materials[p.color || 'frame']);
+    part.position.set(p.x || 0, p.y || 0, p.z || 0);
+    if (p.rx) part.rotation.x = p.rx;
+    if (p.rz) part.rotation.z = p.rz;
+    group.add(part);
+  }
+
+  mergeMeshesByMaterial(group);
+  const muzzle = new THREE.Object3D();
+  const m = spec.muzzle || {};
+  muzzle.position.set(m.x || 0, m.y || 0, m.z ?? -(rec.d / 2 + 0.1));
+  group.add(muzzle);
+  return { group, muzzle, barrelLength: Math.abs(muzzle.position.z) };
+}
+
+/** S-9 VIPER: stubby, suppressed, a long magazine and a red stripe on the rail. */
+function buildSmgModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x272d35, frame: 0x191c20, accent: 0xc2321f },
+    receiver: { w: 0.072, h: 0.095, d: 0.3 },
+    barrels: [
+      { r0: 0.013, r1: 0.012, len: 0.16, y: 0.005, z: -0.22 },  // barrel
+      { r0: 0.021, r1: 0.02, len: 0.1, y: 0.005, z: -0.3 },     // stubby suppressor
+    ],
+    boxes: [
+      { w: 0.062, h: 0.05, d: 0.14, y: -0.004, z: -0.2 },              // handguard
+      { w: 0.026, h: 0.026, d: 0.24, y: 0.062, z: -0.03, color: 'body' }, // top rail
+      { w: 0.028, h: 0.05, d: 0.028, y: 0.1, z: -0.06 },               // front sight
+      { w: 0.05, h: 0.16, d: 0.058, y: -0.15, z: 0.01, rx: 0.16 },     // magazine
+      { w: 0.05, h: 0.1, d: 0.05, y: -0.1, z: 0.095, rx: -0.3 },       // grip
+      { w: 0.046, h: 0.055, d: 0.15, y: -0.005, z: 0.19 },             // folded stock
+      { w: 0.074, h: 0.01, d: 0.14, y: 0.026, z: -0.12, color: 'accent' }, // viper stripe
+    ],
+    muzzle: { x: 0, y: 0.005, z: -0.37 },
+  });
+}
+
+/** MKR-1 MARKSMAN: long heavy barrel, big scope, wooden-toned stock and rail. */
+function buildDmrModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x232a2a, frame: 0x151819, accent: 0x8a6b2b },
+    receiver: { w: 0.07, h: 0.105, d: 0.42 },
+    barrels: [
+      { r0: 0.015, r1: 0.012, len: 0.34, y: 0.008, z: -0.37 },  // heavy barrel
+      { r0: 0.022, r1: 0.019, len: 0.06, y: 0.008, z: -0.56 },  // muzzle brake
+      { r0: 0.026, r1: 0.026, len: 0.26, y: 0.098, z: -0.03 },  // scope tube
+      { r0: 0.02, r1: 0.024, len: 0.04, y: 0.098, z: -0.17 },   // objective bell
+    ],
+    boxes: [
+      { w: 0.068, h: 0.07, d: 0.26, y: -0.006, z: -0.28 },           // handguard
+      { w: 0.03, h: 0.03, d: 0.34, y: 0.072, z: -0.02, color: 'body' }, // rail
+      { w: 0.028, h: 0.05, d: 0.05, y: 0.062, z: -0.12 },            // front scope mount
+      { w: 0.028, h: 0.05, d: 0.05, y: 0.062, z: 0.08 },             // rear scope mount
+      { w: 0.05, h: 0.14, d: 0.08, y: -0.12, z: -0.04, rx: 0.08 },   // magazine
+      { w: 0.05, h: 0.12, d: 0.055, y: -0.11, z: 0.12, rx: -0.3 },   // grip
+      { w: 0.058, h: 0.09, d: 0.3, y: -0.012, z: 0.33, rx: -0.04 },  // butt stock
+      { w: 0.06, h: 0.03, d: 0.09, y: 0.045, z: 0.28 },              // cheek rest
+      { w: 0.072, h: 0.01, d: 0.2, y: 0.032, z: -0.1, color: 'accent' }, // brass accent
+    ],
+    muzzle: { x: 0, y: 0.008, z: -0.6 },
+  });
+}
+
+/** Damage each body behind the first takes, compounding: 60%, then 36%. */
+export const PENETRATION_DAMAGE_MULT = 0.6;
+
+/**
  * Damage multiplier for a hit at `distance` metres.
  * Full damage up to `falloff.start`, linear fall-off to `falloff.min` at `falloff.end`.
  */
@@ -609,6 +782,8 @@ export function computeFalloff(def, distance) {
 const VIEWMODEL_BUILDERS = {
   rifle: buildRifleModel,
   shotgun: buildShotgunModel,
+  smg: buildSmgModel,
+  dmr: buildDmrModel,
   knife: buildKnifeModel,
   pipe: buildPipeModel,
   axe: buildAxeModel,
@@ -866,7 +1041,10 @@ export class WeaponSystem {
     let added = false;
     for (const st of this.states) {
       if (st.def.category !== 'firearm') continue;
+      // A weapon without a pickup value simply keeps its reserve (every firearm
+      // has one today - the schema test enforces it).
       const amount = AMMO_PICKUP[st.def.id];
+      if (!amount) continue;
       const before = st.reserve;
       st.reserve = Math.min(st.def.maxReserve, st.reserve + amount);
       if (st.reserve > before) added = true;
@@ -1111,47 +1289,39 @@ export class WeaponSystem {
         .addScaledVector(right, Math.cos(a) * r)
         .addScaledVector(up, Math.sin(a) * r)
         .normalize();
-      results.push(this.traceRay(origin, dir, def.range, ctx, hitboxes));
+      results.push(this.traceRay(origin, dir, def.range, ctx, hitboxes, def.penetration || 0));
     }
 
     // Resolve hits. Each enemy gets at most one blood burst per shot.
     const burstEnemies = new Set();
     let impacts = 0;
     let hitAnything = false;
-    let furthest = null;
     for (const res of results) {
       if (res.type === 'enemy') {
         hitAnything = true;
-        const falloff = this.falloffFor(def, res.distance);
-        const damage = def.damage * falloff * (res.headshot ? def.headshotMultiplier : 1);
-        const outcome = this.hooks.onEnemyHit?.({
-          enemy: res.enemy,
-          damage,
-          headshot: res.headshot,
-          point: res.point,
-          distance: res.distance,
-          weapon: def.id,
-        });
-        // One blood burst and one hit sound per enemy per shot (shotgun pellets).
-        if (!burstEnemies.has(res.enemy)) {
-          burstEnemies.add(res.enemy);
-          this.effects.spawnBlood(res.point, res.normal, res.headshot ? 1.6 : 1);
-          this.audio.playHitFlesh(res.headshot);
-        }
-        if (outcome?.killed) this.effects.spawnBlood(res.point, res.normal, 2);
-      } else if (res.type === 'world') {
-        if (impacts < 3) {
-          this.effects.spawnImpact(res.point, res.normal, res.surface, res.owner);
-          impacts++;
+        this.resolveEnemyHit(def, res, 1, burstEnemies);
+        // A penetrating round keeps going at a fraction of its damage
+        // (60%, then 36% if a weapon ever penetrates two bodies). Non-penetrating
+        // weapons never build the array, so ordinary shots pay nothing for it.
+        if (res.pierced) {
+          for (let i = 0; i < res.pierced.length; i++) {
+            this.resolveEnemyHit(def, res.pierced[i], PENETRATION_DAMAGE_MULT ** (i + 1), burstEnemies);
+          }
         }
       }
-      if (res.type !== 'miss' && (!furthest || res.distance > furthest.distance)) furthest = res;
+      // Where the bullet actually stopped: the wall right behind a pierced
+      // body gets the decal, and the tracer ends there too.
+      const stop = res.behind || res;
+      if (stop.type === 'world' && impacts < 3) {
+        this.effects.spawnImpact(stop.point, stop.normal, stop.surface, stop.owner);
+        impacts++;
+      }
     }
 
     // Visual + audio feedback for the shot itself.
     const muzzle = this.models[this.index].muzzle.getWorldPosition(this._muzzle);
     if (def.tracer) {
-      const end = results[0].point;
+      const end = results[0].behind ? results[0].behind.point : results[0].point;
       this.effects.spawnTracer(muzzle, end, 0xffd27a);
     }
     this.flashTimer = 0.05;
@@ -1168,6 +1338,35 @@ export class WeaponSystem {
     this.hooks.onShot?.(def, hitAnything);
   }
 
+  /**
+   * Applies one enemy hit from a trace: falloff, headshot multiplier, the game's
+   * damage hook, blood and the flesh-hit sound. One blood burst and one sound per
+   * enemy per shot, however many pellets or pierced bodies were involved.
+   *
+   * @param {object} def         weapon def
+   * @param {object} hit         a traceRay() enemy result
+   * @param {number} scale       damage scale: 1 for the first body, less for pierced ones
+   * @param {Set<object>} burstEnemies  enemies already reported for this shot
+   */
+  resolveEnemyHit(def, hit, scale, burstEnemies) {
+    const falloff = this.falloffFor(def, hit.distance);
+    const damage = def.damage * scale * falloff * (hit.headshot ? def.headshotMultiplier : 1);
+    const outcome = this.hooks.onEnemyHit?.({
+      enemy: hit.enemy,
+      damage,
+      headshot: hit.headshot,
+      point: hit.point,
+      distance: hit.distance,
+      weapon: def.id,
+    });
+    if (!burstEnemies.has(hit.enemy)) {
+      burstEnemies.add(hit.enemy);
+      this.effects.spawnBlood(hit.point, hit.normal, hit.headshot ? 1.6 : 1);
+      this.audio.playHitFlesh(hit.headshot);
+    }
+    if (outcome?.killed) this.effects.spawnBlood(hit.point, hit.normal, 2);
+  }
+
   /** Damage multiplier for distance (shotgun falloff). */
   falloffFor(def, distance) {
     return computeFalloff(def, distance);
@@ -1176,8 +1375,13 @@ export class WeaponSystem {
   /**
    * Finds what a ray hits first: enemy hitbox, world box, floor/ceiling, or nothing.
    * Returns { type: 'enemy'|'world'|'miss', point, normal, distance, enemy?, headshot? }.
+   *
+   * `penetration` lets the ray keep going through that many extra enemy bodies
+   * (the marksman round): the additional hits come back in `pierced`, and
+   * whatever finally stopped the ray in `behind`, so the tracer and the wall
+   * decal still land behind the bodies it went through.
    */
-  traceRay(origin, dir, range, ctx, hitboxes) {
+  traceRay(origin, dir, range, ctx, hitboxes, penetration = 0) {
     const o = { x: origin.x, y: origin.y, z: origin.z };
     const d = { x: dir.x, y: dir.y, z: dir.z };
     const worldHit = raycastBoxes(o, d, range, ctx.colliders);
@@ -1195,28 +1399,65 @@ export class WeaponSystem {
       if (t > 0 && t < maxDist) { planeT = t; planeNormal = { x: 0, y: -1, z: 0 }; surface = 'ceiling'; }
     }
     if (planeT < maxDist) maxDist = planeT;
+    // The wall/floor result is only built when the ray is not stopped by a body,
+    // so the ordinary single-hit path allocates exactly what it used to.
+    const plane = planeT < Infinity ? { t: planeT, normal: planeNormal, surface } : null;
 
     // Enemy hitboxes (nearest targetable one that is closer than the wall).
     this.raycaster.set(origin, dir);
     this.raycaster.far = maxDist;
     const hits = this.raycaster.intersectObjects(hitboxes, false);
+
+    if (penetration <= 0) {
+      for (const hit of hits) {
+        const enemy = hit.object.userData.enemy;
+        if (!enemy || !enemy.isTargetable()) continue;
+        return this.enemyHitResult(hit, dir);
+      }
+      return this.stopResult(origin, dir, range, worldHit, plane);
+    }
+
+    // Penetrating shot: walk the (distance-sorted) hits and keep one result per
+    // enemy - a body and a head box belong to the same target, so they must not
+    // both count as bodies to shoot through.
+    const got = [];
     for (const hit of hits) {
       const enemy = hit.object.userData.enemy;
       if (!enemy || !enemy.isTargetable()) continue;
-      return {
-        type: 'enemy',
-        enemy,
-        headshot: hit.object.name === 'hitbox-head',
-        point: hit.point.clone(),
-        normal: { x: -dir.x, y: -dir.y, z: -dir.z },
-        distance: hit.distance,
-      };
+      if (got.some((result) => result.enemy === enemy)) continue;
+      got.push(this.enemyHitResult(hit, dir));
+      if (got.length > penetration) break;
     }
+    if (got.length === 0) return this.stopResult(origin, dir, range, worldHit, plane);
+    const primary = got[0];
+    primary.pierced = got.slice(1);
+    primary.behind = this.stopResult(origin, dir, range, worldHit, plane);
+    return primary;
+  }
 
-    if (planeT < Infinity && planeT <= (worldHit ? worldHit.distance : Infinity)) {
-      const point = new THREE.Vector3(origin.x + dir.x * planeT, origin.y + dir.y * planeT, origin.z + dir.z * planeT);
+  /** One enemy hit, in the shape a non-penetrating traceRay() returns. */
+  enemyHitResult(hit, dir) {
+    return {
+      type: 'enemy',
+      enemy: hit.object.userData.enemy,
+      headshot: hit.object.name === 'hitbox-head',
+      point: hit.point.clone(),
+      normal: { x: -dir.x, y: -dir.y, z: -dir.z },
+      distance: hit.distance,
+    };
+  }
+
+  /**
+   * Result for a ray that met no (further) targetable enemy: the world box, the
+   * floor/ceiling plane, or nothing within range.
+   *
+   * @param {object} plane  floor/ceiling slab test {t, normal, surface}, or null
+   */
+  stopResult(origin, dir, range, worldHit, plane) {
+    if (plane && plane.t <= (worldHit ? worldHit.distance : Infinity)) {
+      const point = new THREE.Vector3(origin.x + dir.x * plane.t, origin.y + dir.y * plane.t, origin.z + dir.z * plane.t);
       // Floor and ceiling never move, so these marks have no owner.
-      return { type: 'world', point, normal: planeNormal, distance: planeT, surface, owner: null };
+      return { type: 'world', point, normal: plane.normal, distance: plane.t, surface: plane.surface, owner: null };
     }
     if (worldHit) {
       const p = worldHit.point;

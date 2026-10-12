@@ -363,6 +363,7 @@ async function main() {
   /* ---------------- weapons ---------------- */
   const weapon = await import(pathToFileURL(path.join(JS_DIR, 'weapon.js')).href);
   const enemyDefs = await import(pathToFileURL(path.join(JS_DIR, 'enemy.js')).href);
+  const audio = await import(pathToFileURL(path.join(JS_DIR, 'audio.js')).href);
   console.log('\nWeapons');
 
   test('shotgun falloff: full damage at 7 m, 30% at 26 m, linear between', () => {
@@ -504,6 +505,84 @@ async function main() {
     assertEqual(slots[2].category, 'melee', 'slot 3 is a melee slot');
     const offered = new Set(slots.flatMap((s) => s.options.map((o) => o.id)));
     assertEqual(offered.size, Object.keys(weapon.WEAPON_DEFS).length, 'every weapon is offered somewhere');
+  });
+
+  test('the S-9 VIPER and MKR-1 MARKSMAN match the roadmap stats', () => {
+    const smg = weapon.WEAPON_DEFS.smg;
+    assertEqual(smg.name, 'S-9 VIPER SMG', 'SMG name');
+    assertEqual(smg.category, 'firearm', 'SMG category');
+    assertEqual(smg.ammoKind, 'rifle', 'SMG shares rifle ammo');
+    assertEqual(smg.damage, 15, 'SMG damage');
+    assertEqual(smg.fireRate, 14, 'SMG fire rate');
+    assertEqual(smg.magazineSize, 35, 'SMG magazine');
+    assertEqual(smg.startReserve, 210, 'SMG reserve');
+    assertEqual(smg.reloadTime, 1.6, 'SMG reload');
+    assertEqual(smg.spread, 0.014, 'SMG spread');
+    assertEqual(smg.auto, true, 'SMG is automatic');
+    assert(smg.maxBloom > smg.spread, 'SMG bloom must visibly widen the cone');
+    assert(smg.switchTime <= 0.3, 'SMG has the fastest draw');
+    assert(smg.falloff && smg.falloff.min < 1, 'SMG is a close-mid weapon');
+
+    const dmr = weapon.WEAPON_DEFS.dmr;
+    assertEqual(dmr.name, 'MKR-1 MARKSMAN', 'DMR name');
+    assertEqual(dmr.category, 'firearm', 'DMR category');
+    assertEqual(dmr.ammoKind, 'rifle', 'DMR shares rifle ammo');
+    assertEqual(dmr.damage, 68, 'DMR damage');
+    assertEqual(dmr.fireRate, 2.2, 'DMR fire rate');
+    assertEqual(dmr.magazineSize, 12, 'DMR magazine');
+    assertEqual(dmr.startReserve, 72, 'DMR reserve');
+    assertEqual(dmr.reloadTime, 2.4, 'DMR reload');
+    assertEqual(dmr.headshotMultiplier, 2.5, 'DMR headshot multiplier');
+    assertEqual(dmr.range, 200, 'DMR range');
+    assertEqual(dmr.penetration, 1, 'DMR penetrates one body');
+    assertEqual(dmr.auto, false, 'DMR is semi-automatic');
+    assertEqual(dmr.falloff, null, 'DMR has no distance falloff');
+    assert(dmr.damage * dmr.headshotMultiplier >= enemyDefs.ENEMY_TYPES.runner.maxHealth,
+      'a marksman headshot drops a runner');
+
+    // Tuning guardrails: the two guns must not outclass the originals at what
+    // those originals are for.
+    const rifle = weapon.WEAPON_DEFS.rifle;
+    assert(smg.switchTime < rifle.switchTime, 'the SMG draws faster than the rifle');
+    assert(dmr.range > rifle.range, 'the DMR reaches further than the rifle');
+    assert(dmr.fireRate < rifle.fireRate && smg.fireRate > rifle.fireRate, 'rate of fire splits the roles');
+  });
+
+  test('every firearm has an ammo pickup amount and a shot profile', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') {
+        assertEqual(weapon.AMMO_PICKUP[id], undefined, `${id} must not receive ammo pickups`);
+        continue;
+      }
+      assert(weapon.AMMO_PICKUP[id] > 0, `${id} needs an AMMO_PICKUP amount`);
+      const profile = audio.shotProfile(def.sound);
+      assert(profile && profile.body, `${id} (sound '${def.sound}') needs a SHOT_PROFILES row`);
+    }
+    assert(weapon.AMMO_PICKUP.smg > weapon.AMMO_PICKUP.dmr, 'SMG ammo is the common kind');
+  });
+
+  test('the rifle and shotgun shot profiles are the ones the game already had', () => {
+    const { SHOT_PROFILES, shotProfile } = audio;
+    const rifle = SHOT_PROFILES.rifle;
+    assertEqual(rifle.noise.length, 2, 'rifle had two noise layers');
+    assertEqual(rifle.noise[0].filter, 'bandpass', 'rifle crack filter');
+    assertEqual(rifle.noise[0].freq, 1400, 'rifle crack frequency');
+    assertEqual(rifle.noise[1].freq, 3500, 'rifle snap frequency');
+    assertEqual(rifle.body.f0, 140, 'rifle body blip start');
+    assertEqual(rifle.body.f1, 45, 'rifle body blip end');
+    assertEqual(rifle.body.decay, 0.12, 'rifle body blip decay');
+
+    const shotgun = SHOT_PROFILES.shotgun;
+    assertEqual(shotgun.noise.length, 1, 'shotgun had one noise layer');
+    assertEqual(shotgun.noise[0].filter, 'lowpass', 'shotgun boom filter');
+    assertEqual(shotgun.noise[0].freq, 2600, 'shotgun boom frequency');
+    assertEqual(shotgun.noise[0].sweepTo, 400, 'shotgun boom sweep');
+    assertEqual(shotgun.noise[0].decay, 0.28, 'shotgun boom decay');
+    assertEqual(shotgun.body.f0, 110, 'shotgun body blip start');
+
+    assertEqual(shotProfile('nope'), rifle, 'an unknown sound falls back to the rifle');
+    const signatures = ['rifle', 'shotgun', 'smg', 'dmr'].map((k) => JSON.stringify(SHOT_PROFILES[k]));
+    assertEqual(new Set(signatures).size, signatures.length, 'every gun must sound different');
   });
 
   test('sustained DPS of every firearm sits inside the 60-160 band', () => {
@@ -866,6 +945,149 @@ async function main() {
         assertEqual(system.loadout.join(','), before, 'an all-garbage pick keeps the current kit');
       } finally {
         system.dispose();
+      }
+    });
+  });
+
+  /* ---------------- new firearms ---------------- */
+  console.log('\nNew firearms');
+
+  /** A system drawn on the DMR (slot 2) with one target box per enemy down -Z. */
+  function makeRange(loadout = ['rifle', 'dmr', 'knife', 'pipe', 'axe'], slot = 1) {
+    const { system } = makeWeaponSystem(loadout);
+    const hits = [];
+    const impulses = [];
+    const nearEnemy = { isTargetable: () => true, name: 'near' };
+    const farEnemy = { isTargetable: () => true, name: 'far' };
+    const target = (z, enemy) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1, 0.45), new THREE.MeshBasicMaterial());
+      mesh.position.set(0, 1.5, z);
+      mesh.userData.enemy = enemy;
+      mesh.updateMatrixWorld(true);
+      return mesh;
+    };
+    const near = target(-2, nearEnemy);
+    const far = target(-6, farEnemy);
+    system.hooks.onEnemyHit = (info) => { hits.push(info); return { killed: false }; };
+    system.effects.spawnImpact = (point, normal, surface, owner) => impulses.push({ point, surface, owner });
+    const ctx = { canFire: true, colliders: [], hitboxes: () => [near, far], speedFactor: 0, bobPhase: 0, dt: 0 };
+    system.requestSwitch(slot);
+    system.update(0.7, {}, ctx); // finish the draw
+    return { system, hits, impulses, ctx, nearEnemy, farEnemy };
+  }
+
+  test('every weapon id has a viewmodel, and the new guns have muzzle anchors', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem();
+      try {
+        for (const id of weapon.WEAPON_IDS) {
+          const model = system.viewmodels.get(id);
+          assert(model && model.group, `${id} needs a viewmodel`);
+        }
+        for (const id of ['rifle', 'shotgun', 'smg', 'dmr']) {
+          const model = system.viewmodels.get(id);
+          assert(model.muzzle, `${id} needs a muzzle marker for its flash sprite`);
+          assert(model.flash?.isSprite, `${id} needs a muzzle flash sprite`);
+          assert(model.barrelLength > 0.2, `${id} barrel length`);
+        }
+        // The parametric builder merges its primitives per material, so a
+        // spec with 15 parts is still a handful of meshes.
+        const materials = new Set();
+        let meshes = 0;
+        system.viewmodels.get('dmr').group.traverse((o) => {
+          if (!o.isMesh) return;
+          meshes++;
+          materials.add(o.material);
+        });
+        // 15 primitives in the spec, merged down to one mesh per palette colour.
+        assert(meshes <= 4, `DMR should merge its parts (got ${meshes} meshes)`);
+        assert(materials.size <= 3, `DMR should reuse its palette (got ${materials.size} materials)`);
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('traceRay penetrates one body, reports where the round stopped, and is unchanged otherwise', () => {
+    withDocumentStub(() => {
+      const { system, ctx } = makeRange();
+      try {
+        const origin = new THREE.Vector3(0, 1.5, 0);
+        const dir = new THREE.Vector3(0, 0, -1);
+        const pierced = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes(), 1);
+        assertEqual(pierced.type, 'enemy', 'the nearest body is the primary hit');
+        assertEqual(pierced.pierced.length, 1, 'the body behind it is pierced');
+        assert(pierced.pierced[0].distance > pierced.distance, 'the pierced hit is further away');
+        assertEqual(pierced.behind.type, 'miss', 'nothing stopped the round inside its range');
+
+        // Without penetration the ray behaves exactly as before.
+        const single = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes());
+        assertEqual(single.type, 'enemy', 'default trace still stops on a body');
+        assertEqual(single.pierced, undefined, 'default trace builds no pierced list');
+        assertEqual(single.behind, undefined, 'default trace builds no behind result');
+
+        // A wall between the two bodies ends the round there.
+        ctx.colliders = [createBox(-3, 0, -4.2, 3, 4, -3.8, 'wall')];
+        const blocked = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes(), 1);
+        assertEqual(blocked.pierced.length, 0, 'a wall stops the round');
+        assertEqual(blocked.behind.type, 'world', 'the wall is what stopped it');
+        assertNear(blocked.behind.distance, 3.8, 0.01, 'wall distance');
+        assertEqual(blocked.behind.surface, 'concrete', 'wall surface drives the decal');
+        assertEqual(blocked.behind.owner, null, 'static walls own no decals');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('a DMR shot deals 60% behind the first body and still marks the wall', () => {
+    withDocumentStub(() => {
+      const { system, hits, impulses, ctx } = makeRange();
+      try {
+        system.update(0.016, { firePressed: true }, ctx);
+        assertEqual(hits.length, 2, 'one trigger pull hits two bodies');
+        assertEqual(hits[0].weapon, 'dmr', 'the hit reports the marksman');
+        assertEqual(hits[0].damage, 68, 'the first body takes full damage');
+        assertNear(hits[1].damage, 68 * weapon.PENETRATION_DAMAGE_MULT, 1e-9, 'the body behind takes 60%');
+        assertEqual(hits[1].distance > hits[0].distance, true, 'the pierced body is further away');
+        assertEqual(impulses.length, 0, 'nothing was hit behind the bodies, so no impact');
+
+        // Wall right behind the pair: the round still stops there and marks it.
+        ctx.colliders = [createBox(-3, 0, -7.5, 3, 4, -7.2, 'wall')];
+        system.update(0.7, {}, ctx); // clear the cooldown
+        system.update(0.016, { firePressed: true }, ctx);
+        assertEqual(hits.length, 4, 'the wall does not block the two bodies in front of it');
+        assertEqual(impulses.length, 1, 'the wall behind the bodies takes the decal');
+        assertNear(impulses[0].point.z, -7.2, 0.05, 'decal sits on the wall face');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('the SMG sprays faster than the rifle, blooms hard and hits for its 15 a round', () => {
+    withDocumentStub(() => {
+      // One second of held trigger at 60 fps, once with each automatic weapon.
+      const spray = (loadout) => {
+        const { system, hits, ctx } = makeRange(loadout, 0);
+        for (let i = 0; i < 60; i++) system.update(1 / 60, { fireHeld: true }, ctx);
+        const result = { shots: system.shotCount, ammo: system.state.ammo, hits, bloom: system.bloom, system };
+        return result;
+      };
+      const smg = spray(['smg', 'shotgun', 'knife', 'pipe', 'axe']);
+      const rifle = spray(['rifle', 'shotgun', 'knife', 'pipe', 'axe']);
+      try {
+        // 14 rounds a second cannot land 14 times in 60 frames, but it must beat
+        // the rifle's 9.5/s comfortably and stay inside the rated rate.
+        assert(smg.shots > rifle.shots, `SMG (${smg.shots}) must out-fire the rifle (${rifle.shots})`);
+        assert(smg.shots >= 11 && smg.shots <= 14, `SMG fired ${smg.shots} rounds in a second`);
+        assertEqual(smg.ammo, 35 - smg.shots, 'every round comes out of the magazine');
+        assert(smg.hits.length > 0 && smg.hits.every((h) => h.damage === 15), 'SMG body shots are 15');
+        assert(smg.bloom > 0, 'the cone widens while the trigger is held');
+        assert(smg.bloom <= weapon.WEAPON_DEFS.smg.maxBloom, 'bloom is capped');
+      } finally {
+        smg.system.dispose();
+        rifle.system.dispose();
       }
     });
   });

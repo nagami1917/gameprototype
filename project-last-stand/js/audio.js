@@ -16,6 +16,50 @@
 
 const MAX_VOICES = 40;
 
+/**
+ * One row per `def.sound`: the noise layers and the body blip that make up a
+ * gunshot. A new weapon is a few numbers here rather than a new branch in
+ * playShot(); `rifle` is the fallback for a sound that has no profile yet.
+ */
+export const SHOT_PROFILES = {
+  // Crack + snap + a short punch: unchanged from the original two-sound code.
+  rifle: {
+    noise: [
+      { volume: 0.55, filter: 'bandpass', freq: 1400, q: 0.9, decay: 0.09 },
+      { volume: 0.3, filter: 'highpass', freq: 3500, q: 0.5, decay: 0.012 },
+    ],
+    body: { volume: 0.35, type: 'sine', f0: 140, f1: 45, decay: 0.12 },
+  },
+  // Low boom, long tail.
+  shotgun: {
+    noise: [{ volume: 0.9, filter: 'lowpass', freq: 2600, q: 0.7, decay: 0.28, sweepTo: 400 }],
+    body: { volume: 0.55, type: 'sine', f0: 110, f1: 32, decay: 0.3 },
+  },
+  // S-9 VIPER: a tight, bright snap with almost no body - it fires fast, so it
+  // must also get out of the way fast.
+  smg: {
+    noise: [
+      { volume: 0.42, filter: 'bandpass', freq: 2100, q: 0.8, decay: 0.055 },
+      { volume: 0.22, filter: 'highpass', freq: 4800, q: 0.5, decay: 0.01 },
+    ],
+    body: { volume: 0.26, type: 'triangle', f0: 180, f1: 70, decay: 0.07 },
+  },
+  // MKR-1 MARKSMAN: deeper and much longer than the rifle, so a marksman shot
+  // is unmistakable in a corridor fight.
+  dmr: {
+    noise: [
+      { volume: 0.7, filter: 'bandpass', freq: 1100, q: 1.1, decay: 0.22, sweepTo: 700 },
+      { volume: 0.3, filter: 'highpass', freq: 3200, q: 0.6, decay: 0.03 },
+    ],
+    body: { volume: 0.45, type: 'sine', f0: 120, f1: 36, decay: 0.26 },
+  },
+};
+
+/** Profile for a `def.sound`, falling back to the rifle. */
+export function shotProfile(kind) {
+  return SHOT_PROFILES[kind] || SHOT_PROFILES.rifle;
+}
+
 export class AudioManager {
   constructor({ volume = 0.8 } = {}) {
     this.enabled = typeof window !== 'undefined' && !!(window.AudioContext || window.webkitAudioContext);
@@ -189,14 +233,9 @@ export class AudioManager {
    * ------------------------------------------------------------------ */
   playShot(kind) {
     if (!this.canPlay()) return;
-    if (kind === 'shotgun') {
-      this.burst({ volume: 0.9, filter: 'lowpass', freq: 2600, q: 0.7, attack: 0.001, decay: 0.28, sweepTo: 400 });
-      this.blip({ volume: 0.55, type: 'sine', f0: 110, f1: 32, decay: 0.3 });
-    } else {
-      this.burst({ volume: 0.55, filter: 'bandpass', freq: 1400, q: 0.9, attack: 0.001, decay: 0.09 });
-      this.burst({ volume: 0.3, filter: 'highpass', freq: 3500, q: 0.5, attack: 0.001, decay: 0.012 });
-      this.blip({ volume: 0.35, type: 'sine', f0: 140, f1: 45, decay: 0.12 });
-    }
+    const profile = shotProfile(kind);
+    for (const layer of profile.noise) this.burst(layer);
+    if (profile.body) this.blip(profile.body);
   }
 
   playDryFire() {
