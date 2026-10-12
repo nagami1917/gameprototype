@@ -169,6 +169,9 @@ export function planLayout(layout, rng = makeRng()) {
           door.collider = horizontal
             ? createBox(x - S / 2, 0, z - 0.15, x + S / 2, WALL_HEIGHT, z + 0.15, 'door')
             : createBox(x - 0.15, 0, z - S / 2, x + 0.15, WALL_HEIGHT, z + S / 2, 'door');
+          // Back-reference from the hit box to the door, so bullet marks placed
+          // on it can be culled as soon as the panel starts retracting.
+          door.collider.owner = door;
           plan.doors.push(door);
           break;
         }

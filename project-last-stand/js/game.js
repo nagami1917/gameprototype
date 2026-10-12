@@ -44,6 +44,34 @@ const SPAWN_MIN_DISTANCE = 14;
 const START_YAW = -Math.PI * 0.75; // face into the start room
 const FLASHLIGHT_PAN_RESPONSE = 8;
 
+/**
+ * Helmet flashlight. The light is split in two so it reads as "a torch in a
+ * dark corridor" instead of "a bright dot on the far wall":
+ *   - the beam: wide, soft-edged and far-reaching, the only shadow caster;
+ *   - the spill: a dim, very wide, short-range cone that fills the floor at
+ *     your feet and the walls either side, so the beam does not feel like a
+ *     tube. No shadows, so it costs no extra shadow pass.
+ * Decay below the physical 2 flattens the falloff: the beam still lights a
+ * wall 25-30 m away instead of dying at ~10 m, without the near field getting
+ * any hotter than it already was (the tone mapper rolls the highlights off).
+ */
+const FLASHLIGHT = Object.freeze({
+  color: 0xdfeeff,
+  intensity: 55,
+  distance: 45,      // metres before the beam is fully cut off
+  angle: 0.95,       // half-angle in radians (~54 deg, i.e. a ~108 deg cone)
+  penumbra: 0.85,    // soft edges, no hard circle on the wall
+  decay: 1.15,
+});
+const FLASHLIGHT_SPILL = Object.freeze({
+  color: 0xcfe2ff,
+  intensity: 8,      // a fill, not a beam: it must not wash out the corridor
+  distance: 8,
+  angle: 1.45,       // ~83 deg half-angle: everything around the player
+  penumbra: 1,
+  decay: 1.4,
+});
+
 export class Game {
   /**
    * @param {object} opts
@@ -106,21 +134,37 @@ export class Game {
     // Dim ambient fill; the lights in the facility do the heavy lifting.
     this.scene.add(new THREE.HemisphereLight(0x8fa3bd, 0x1a1a20, 0.9));
 
-    // Helmet flashlight with shadows (toggle in settings).
-    this.flashlight = new THREE.SpotLight(0xdfeeff, 100, 30, 0.7, 0.5, 2);
+    // Helmet flashlight: a long soft beam plus a short-range spill (see FLASHLIGHT above).
+    this.flashlight = new THREE.SpotLight(
+      FLASHLIGHT.color, FLASHLIGHT.intensity, FLASHLIGHT.distance,
+      FLASHLIGHT.angle, FLASHLIGHT.penumbra, FLASHLIGHT.decay,
+    );
     this.flashlight.position.set(0.15, -0.08, 0);
     this.flashlight.target.position.set(0, -0.1, -10);
     this.flashlightAimQuaternion = this.camera.quaternion.clone();
     this.flashlightAimDirection = new THREE.Vector3(0, 0, -1);
     this.flashlightTargetPosition = new THREE.Vector3();
     this.flashlight.castShadow = this.settings.shadows;
-    this.flashlight.shadow.mapSize.set(1024, 1024);
+    // The cone is much wider than before, so the shadow map covers more world
+    // space per texel: a bigger map (and a touch more bias) keeps it crisp.
+    this.flashlight.shadow.mapSize.set(2048, 2048);
     this.flashlight.shadow.camera.near = 0.1;
-    this.flashlight.shadow.camera.far = 30;
-    this.flashlight.shadow.bias = -0.0008;
-    this.flashlight.shadow.normalBias = 0.03;
+    this.flashlight.shadow.camera.far = FLASHLIGHT.distance;
+    this.flashlight.shadow.bias = -0.0006;
+    this.flashlight.shadow.normalBias = 0.05;
     this.camera.add(this.flashlight);
     this.scene.add(this.flashlight.target);
+
+    // Near-field fill. Shares the beam's target, so the pan code below drives
+    // both lights with no extra work.
+    this.flashlightSpill = new THREE.SpotLight(
+      FLASHLIGHT_SPILL.color, FLASHLIGHT_SPILL.intensity, FLASHLIGHT_SPILL.distance,
+      FLASHLIGHT_SPILL.angle, FLASHLIGHT_SPILL.penumbra, FLASHLIGHT_SPILL.decay,
+    );
+    this.flashlightSpill.position.set(0.1, -0.05, -0.1);
+    this.flashlightSpill.castShadow = false;
+    this.flashlightSpill.target = this.flashlight.target;
+    this.camera.add(this.flashlightSpill);
 
     this.level = new Level(this.scene, { renderer: this.renderer });
     this.effects = new EffectsManager(this.scene, { bounds: this.level.bounds });
@@ -752,7 +796,9 @@ export class Game {
     this.actorCache.push(this.player.position);
     for (const e of this.enemies) if (e.isAlive()) this.actorCache.push(e.position);
     this.level.update(dt, this.actorCache);
-    this.effects.update(dt, this.time);
+    // Doors are handed to the effects system so bullet marks can die with the
+    // panel they were shot into, instead of hanging in the open doorway.
+    this.effects.update(dt, this.time, this.level.doors);
     this.level.pickups.update(dt, this.time);
     this.audio.setListener(this.player.position.x, this.player.position.z, this.player.yaw);
     this.audio.update(dt);
