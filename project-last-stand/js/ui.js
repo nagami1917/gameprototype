@@ -10,7 +10,7 @@
  * HUD updates are diffed: a value is only written to the DOM when it changes.
  */
 
-const SCREEN_IDS = ['menu', 'settings', 'controls', 'credits', 'pause', 'gameover', 'loading'];
+const SCREEN_IDS = ['menu', 'loadout', 'settings', 'controls', 'credits', 'pause', 'gameover', 'loading'];
 
 export class UI {
   constructor(root = document) {
@@ -34,10 +34,11 @@ export class UI {
       'hud-stamina-text', 'hud-stamina-bar', 'hud-stamina-fill', 'dash-effect',
       'crosshair', 'hitmarker', 'flash-damage', 'low-health', 'damage-indicator',
       'banner', 'banner-title', 'banner-sub', 'countdown', 'toasts',
+      'hud-slots',
       'menu-high-score', 'menu-high-wave', 'go-score', 'go-kills', 'go-wave', 'go-headshots', 'go-record',
       'set-sensitivity', 'out-sensitivity', 'set-fov', 'out-fov', 'set-volume', 'out-volume',
       'set-invert', 'set-shadows', 'set-shake', 'loading-text', 'pause-note',
-      'fatal-error', 'fatal-text',
+      'loadout-grid', 'fatal-error', 'fatal-text',
     ];
     for (const id of ids) this.el[id] = this.$(id);
     this.slotEls = Array.from(this.root.querySelectorAll('[data-slot]'));
@@ -55,6 +56,8 @@ export class UI {
       if (el) el.addEventListener('click', fn);
     };
     on('btn-play', () => hooks.onPlay?.());
+    on('btn-loadout', () => this.showScreen('loadout'));
+    on('btn-loadout-back', () => this.showScreen('menu'));
     on('btn-settings', () => this.openSettings('menu'));
     on('btn-controls', () => this.showScreen('controls'));
     on('btn-credits', () => this.showScreen('credits'));
@@ -80,6 +83,15 @@ export class UI {
       const el = this.$(id);
       if (el) el.addEventListener('input', sliderHandler);
       if (el) el.addEventListener('change', sliderHandler);
+    }
+
+    // The loadout screen reports the whole five-slot kit on every change; the
+    // game sanitizes it and writes the accepted loadout straight back.
+    const loadoutGrid = this.el['loadout-grid'];
+    if (loadoutGrid) {
+      loadoutGrid.addEventListener('change', () => {
+        hooks.onLoadoutChange?.(this.readLoadoutControls());
+      });
     }
 
     this.root.addEventListener('keydown', (e) => this.handleKey(e));
@@ -165,6 +177,78 @@ export class UI {
     this.setText(this.el['loading-text'], text);
   }
 
+  /**
+   * Rebuilds the HUD slot chips from the live loadout (index i = key i + 1),
+   * so the HUD lists what the player actually carries instead of a fixed set.
+   * @param {string[]} labels  e.g. ['1 RIFLE', '2 SHOTGUN', '3 KNIFE', ...]
+   */
+  setLoadout(labels) {
+    const container = this.el['hud-slots'];
+    if (!container) return;
+    container.textContent = '';
+    labels.forEach((label, i) => {
+      const span = this.root.createElement('span');
+      span.className = 'slot';
+      span.dataset.slot = String(i + 1);
+      span.textContent = label;
+      container.appendChild(span);
+    });
+    this.slotEls = Array.from(container.querySelectorAll('[data-slot]'));
+    // The chips are new elements, so the active-slot diff must repaint them.
+    delete this.lastHud.slot;
+  }
+
+  /**
+   * Fills the loadout screen: one select per key, listing the weapons that fit
+   * that slot. The rows are only rebuilt when the offered options change, so
+   * writing a rejected (duplicate) loadout back does not steal focus.
+   *
+   * @param {string[]} loadout  weapon id per key
+   * @param {Array<{index:number,name:string,options:Array<{id:string,name:string}>}>} slots
+   */
+  writeLoadoutControls(loadout, slots = []) {
+    const grid = this.el['loadout-grid'];
+    if (!grid || slots.length === 0) return;
+    const signature = slots.map((slot) => slot.options.map((option) => option.id).join('|')).join(';');
+    if (grid.dataset.options !== signature) {
+      grid.textContent = '';
+      for (const slot of slots) {
+        const row = this.root.createElement('label');
+        row.className = 'setting loadout-row';
+        const name = this.root.createElement('span');
+        name.className = 'setting-name';
+        name.textContent = slot.name;
+        const select = this.root.createElement('select');
+        select.className = 'loadout-select';
+        select.dataset.loadoutSlot = String(slot.index);
+        for (const option of slot.options) {
+          const el = this.root.createElement('option');
+          el.value = option.id;
+          // Weapons that unlock later are listed but flagged, so the screen
+          // stays honest about what a fresh save can actually pick.
+          el.textContent = option.unlockWave > 1 ? `${option.name} (WAVE ${option.unlockWave})` : option.name;
+          select.appendChild(el);
+        }
+        row.appendChild(name);
+        row.appendChild(select);
+        grid.appendChild(row);
+      }
+      grid.dataset.options = signature;
+    }
+    for (const select of grid.querySelectorAll('[data-loadout-slot]')) {
+      select.value = loadout[Number(select.dataset.loadoutSlot)] ?? select.value;
+    }
+  }
+
+  /** Reads the five selects back into a weapon id per key. */
+  readLoadoutControls() {
+    const grid = this.el['loadout-grid'];
+    if (!grid) return [];
+    return Array.from(grid.querySelectorAll('[data-loadout-slot]'))
+      .sort((a, b) => Number(a.dataset.loadoutSlot) - Number(b.dataset.loadoutSlot))
+      .map((select) => select.value);
+  }
+
   /** Sets menu records from storage. */
   setRecords({ highScore, highWave }) {
     this.setText(this.el['menu-high-score'], highScore.toLocaleString());
@@ -236,7 +320,7 @@ export class UI {
       if (this.screen === 'settings') {
         e.preventDefault();
         this.closeSettings();
-      } else if (this.screen === 'controls' || this.screen === 'credits') {
+      } else if (this.screen === 'controls' || this.screen === 'credits' || this.screen === 'loadout') {
         e.preventDefault();
         this.showScreen('menu');
       }

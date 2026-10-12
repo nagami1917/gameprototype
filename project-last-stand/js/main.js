@@ -56,6 +56,7 @@ function boot() {
     onMainMenu: () => game.toMainMenu(),
     onSettingsChange: (s) => game.updateSettings(s),
     onSettingsReset: () => game.resetSettings(),
+    onLoadoutChange: (ids) => game.setLoadout(ids),
   });
 
   window.addEventListener('unhandledrejection', (e) => {
@@ -63,9 +64,20 @@ function boot() {
   });
   window.addEventListener('pagehide', () => game.dispose());
 
+  const params = new URLSearchParams(window.location.search);
+
   // Debug hook for development: add ?debug to the URL.
-  if (new URLSearchParams(window.location.search).has('debug')) {
+  if (params.has('debug')) {
     window.lastStand = game;
+  }
+
+  // Debug loadout: ?weapons=smg,dmr fills slot 1/2 and keeps the melee kit.
+  // Not persisted, so the saved loadout survives a debug run.
+  const weapons = params.get('weapons');
+  if (weapons) {
+    const ids = weapons.split(',').map((id) => id.trim()).filter(Boolean);
+    const applied = game.setLoadout(ids, false);
+    console.info(`[main] debug loadout: ${applied.join(', ')}`);
   }
 }
 

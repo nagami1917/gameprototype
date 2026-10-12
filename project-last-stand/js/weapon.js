@@ -13,6 +13,13 @@
  *
  * Nothing is removed "on click": a shot only damages an enemy whose
  * hitbox is actually under the (spread-jittered) crosshair ray.
+ *
+ * Every weapon is described by a plain data block in `WEAPON_DEFS`;
+ * `validateWeaponDef()` is the schema check the test suite runs over all of
+ * them, and the numbers it derives (`sustainedDps()`) are the balance
+ * guardrails. The five keys 1-5 are no longer hard-wired to weapon ids: they
+ * index `loadout`, an array of ids built by `sanitizeLoadout()` and persisted
+ * with the settings.
  */
 import * as THREE from 'three';
 import { raycastBoxes } from './collision.js';
@@ -25,7 +32,12 @@ export const WEAPON_DEFS = {
     id: 'rifle',
     category: 'firearm',
     name: 'MX-7 ASSAULT RIFLE',
-    slot: 1,
+    shortName: 'RIFLE',      // HUD slot label
+    slot: 1,                 // default slot; `loadout` may move it
+    ammoKind: 'rifle',       // which pickups refill it (see AMMO_PICKUP)
+    unlockWave: 1,           // earliest wave the loadout screen may offer it
+    moveSpeedMult: 1,        // hold-speed multiplier while it is drawn
+    adsZoom: 1.25,           // aimed FOV multiplier (reserved: not wired yet)
     damage: 24,
     headshotMultiplier: 2,
     fireRate: 9.5,          // shots per second
@@ -51,7 +63,12 @@ export const WEAPON_DEFS = {
     id: 'shotgun',
     category: 'firearm',
     name: 'HB-12 HELLBORE SHOTGUN',
+    shortName: 'SHOTGUN',
     slot: 2,
+    ammoKind: 'shell',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 1,
     damage: 13,             // per pellet
     headshotMultiplier: 2,
     fireRate: 1.05,
@@ -73,11 +90,77 @@ export const WEAPON_DEFS = {
     tracer: false,
     sound: 'shotgun',
   },
+  smg: {
+    id: 'smg',
+    category: 'firearm',
+    name: 'S-9 VIPER SMG',
+    shortName: 'SMG',
+    slot: 1,                 // shares slot 1 with the rifle: both are "the close one"
+    ammoKind: 'rifle',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 1.15,
+    damage: 15,
+    headshotMultiplier: 1.6, // less rewarding than a rifle round: it is a spray gun
+    fireRate: 14,
+    auto: true,
+    magazineSize: 35,
+    startReserve: 210,
+    maxReserve: 420,
+    reloadTime: 1.6,
+    reloadMode: 'magazine',
+    switchTime: 0.3,         // fastest draw in the game
+    pellets: 1,
+    spread: 0.014,
+    bloomPerShot: 0.006,     // heavy bloom: the first rounds are the accurate ones
+    maxBloom: 0.055,
+    bloomDecay: 4.5,
+    range: 70,
+    falloff: { start: 16, end: 45, min: 0.5 }, // close-mid weapon: half damage past 45 m
+    recoil: { pitch: 0.008, yaw: 0.005, kick: 0.03, trauma: 0.1 },
+    tracer: true,
+    sound: 'smg',
+  },
+  dmr: {
+    id: 'dmr',
+    category: 'firearm',
+    name: 'MKR-1 MARKSMAN',
+    shortName: 'MARKSMAN',
+    slot: 2,                 // the long-range alternative to the shotgun
+    ammoKind: 'rifle',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 2.2,
+    damage: 68,
+    headshotMultiplier: 2.5,
+    fireRate: 2.2,
+    auto: false,
+    magazineSize: 12,
+    startReserve: 72,
+    maxReserve: 144,
+    reloadTime: 2.4,
+    reloadMode: 'magazine',
+    switchTime: 0.65,
+    pellets: 1,
+    spread: 0.0035,
+    bloomPerShot: 0.006,
+    maxBloom: 0.02,
+    bloomDecay: 6,
+    range: 200,              // long lanes across the whole facility
+    falloff: null,           // a marksman round does not care about distance
+    penetration: 1,          // keeps going through one body at 60% damage
+    recoil: { pitch: 0.03, yaw: 0.006, kick: 0.08, trauma: 0.3 },
+    tracer: true,
+    sound: 'dmr',
+  },
   knife: {
     id: 'knife',
     category: 'melee',
     name: 'FIELD KNIFE',
+    shortName: 'KNIFE',
     slot: 3,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 44,
     reach: 1.65,
     arcDegrees: 14,
@@ -99,7 +182,10 @@ export const WEAPON_DEFS = {
     id: 'pipe',
     category: 'melee',
     name: 'STEEL PIPE',
+    shortName: 'PIPE',
     slot: 4,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 52,
     reach: 1.9,
     arcDegrees: 42,
@@ -119,7 +205,10 @@ export const WEAPON_DEFS = {
     id: 'axe',
     category: 'melee',
     name: 'FIRE AXE',
+    shortName: 'AXE',
     slot: 5,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 95,
     reach: 2.05,
     arcDegrees: 30,
@@ -140,8 +229,252 @@ export const WEAPON_DEFS = {
 /** Slot order is stable: rifle and shotgun keep their existing keys. */
 export const WEAPON_ORDER = ['rifle', 'shotgun', 'knife', 'pipe', 'axe'];
 
+/**
+ * Slots 1-5 are data now: keys 1-5 select `loadout[i]`, so a new weapon does
+ * not need a new key or a HUD edit. The default is today's fixed order.
+ */
+export const SLOT_COUNT = WEAPON_ORDER.length;
+
+/** Category each slot accepts; the loadout screen and sanitizeLoadout() share it. */
+export const SLOT_CATEGORIES = Object.freeze(['firearm', 'firearm', 'melee', 'melee', 'melee']);
+
+export const DEFAULT_LOADOUT = Object.freeze([...WEAPON_ORDER]);
+
 /** Firearms only; melee weapons never consume or receive ammunition. */
-export const AMMO_PICKUP = { rifle: 45, shotgun: 10 };
+export const AMMO_PICKUP = {
+  rifle: 45,
+  shotgun: 10,
+  smg: 90,     // cheap, small rounds: pickups top the Viper up quickly
+  dmr: 24,     // marksman rounds are the reason the DMR is not the default gun
+};
+
+/** Every weapon that can be picked in a loadout, in catalogue order. */
+export const WEAPON_IDS = Object.freeze(Object.keys(WEAPON_DEFS));
+
+/**
+ * True for a weapon id that exists and belongs in `category` (used to keep a
+ * firearm out of a melee slot and the other way round).
+ */
+function fitsSlot(id, category) {
+  const def = WEAPON_DEFS[id];
+  return !!def && (category ? def.category === category : true);
+}
+
+/**
+ * Coerces anything into a usable 5-slot loadout: unknown ids, duplicates,
+ * weapons in the wrong category and missing entries all fall back to `base`
+ * (or to the first legal weapon for that slot).
+ *
+ * @param {unknown} input    array of weapon ids, possibly short or bogus
+ * @param {string[]} [base]  loadout to fall back to, defaults to the standard one
+ * @returns {string[]}       a new array of exactly SLOT_COUNT valid ids
+ */
+export function sanitizeLoadout(input, base = DEFAULT_LOADOUT) {
+  const fallback = Array.isArray(base) && base.length === SLOT_COUNT ? base : DEFAULT_LOADOUT;
+  const used = new Set();
+  const out = [];
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const category = SLOT_CATEGORIES[i];
+    const wanted = Array.isArray(input) ? input[i] : null;
+    const pick = [wanted, fallback[i]]
+      .find((id) => fitsSlot(id, category) && !used.has(id))
+      ?? WEAPON_IDS.find((id) => WEAPON_DEFS[id].category === category && !used.has(id))
+      ?? fallback[i];
+    out.push(pick);
+    used.add(pick);
+  }
+  return out;
+}
+
+/** HUD labels for a loadout: `['1 RIFLE', '2 SHOTGUN', ...]`, key = index + 1. */
+export function hudSlotLabels(loadout = DEFAULT_LOADOUT) {
+  return loadout.map((id, i) => `${i + 1} ${WEAPON_DEFS[id]?.shortName ?? WEAPON_DEFS[id]?.name ?? id}`);
+}
+
+/**
+ * What the loadout screen may offer per slot: one entry per key, with the legal
+ * weapons for that category. Built from WEAPON_DEFS so a new gun only needs a
+ * def to appear in the menu.
+ */
+export function loadoutSlotOptions() {
+  return SLOT_CATEGORIES.map((category, index) => ({
+    index,
+    category,
+    name: `SLOT ${index + 1} - ${category === 'firearm' ? 'FIREARM' : 'MELEE'}`,
+    options: WEAPON_IDS.filter((id) => WEAPON_DEFS[id].category === category)
+      .map((id) => ({ id, name: WEAPON_DEFS[id].name, unlockWave: WEAPON_DEFS[id].unlockWave })),
+  }));
+}
+
+/* ------------------------------------------------------------------ *
+ * Schema + balance helpers (pure: no three.js, no game state)
+ * ------------------------------------------------------------------ */
+
+/** Fields every def must provide, per category, by type. */
+const REQUIRED_FIELDS = {
+  firearm: {
+    number: ['damage', 'headshotMultiplier', 'fireRate', 'magazineSize', 'startReserve', 'maxReserve',
+      'reloadTime', 'switchTime', 'pellets', 'spread', 'range', 'bloomPerShot', 'maxBloom', 'bloomDecay',
+      'unlockWave', 'moveSpeedMult', 'adsZoom'],
+    string: ['name', 'shortName', 'ammoKind', 'reloadMode', 'sound'],
+    boolean: ['auto'],
+    object: ['recoil'],
+  },
+  melee: {
+    number: ['damage', 'reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
+      'attackCooldown', 'switchTime', 'unlockWave', 'moveSpeedMult'],
+    string: ['name', 'shortName', 'swing'],
+    boolean: [],
+    object: [],
+  },
+};
+
+/** Fields that only make sense for one category and must be absent from the other. */
+const CATEGORY_ONLY_FIELDS = {
+  firearm: ['magazineSize', 'startReserve', 'maxReserve', 'reloadTime', 'reloadMode', 'ammoKind',
+    'auto', 'pellets', 'spread', 'bloomPerShot', 'maxBloom', 'bloomDecay', 'recoil', 'falloff',
+    'headshotMultiplier', 'penetration', 'adsZoom', 'tracer', 'sound'],
+  melee: ['reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
+    'swing', 'windup', 'strikeEnd', 'activeTime', 'trailColor'],
+};
+
+export const AMMO_KINDS = Object.freeze(['rifle', 'shell', 'heavy', 'explosive']);
+
+/**
+ * Checks one weapon def against the schema. Pure, so the test suite can run it
+ * over every def (and over deliberately broken ones) without a browser.
+ *
+ * Cross-def rules (slot uniqueness) need the whole table: they compare `def`
+ * with the other weapons that share the *default* loadout, because a loadout
+ * holds exactly one weapon per key while two weapons may declare the same
+ * preferred slot (the S-9 and the MX-7 both default to slot 1).
+ *
+ * @param {object} def                 weapon definition
+ * @param {object} [allDefs]           whole table, defaults to WEAPON_DEFS
+ * @param {string[]} [loadout]         default loadout, defaults to DEFAULT_LOADOUT
+ * @returns {{valid: boolean, errors: string[]}}
+ */
+export function validateWeaponDef(def, allDefs = WEAPON_DEFS, loadout = DEFAULT_LOADOUT) {
+  const errors = [];
+  const fail = (msg) => errors.push(msg);
+  if (!def || typeof def !== 'object') return { valid: false, errors: ['def must be an object'] };
+
+  const id = def.id;
+  if (typeof id !== 'string' || id.length === 0) fail('id must be a non-empty string');
+  const category = def.category;
+  if (category !== 'firearm' && category !== 'melee') {
+    fail(`category must be 'firearm' or 'melee' (got ${String(category)})`);
+    return { valid: false, errors };
+  }
+
+  const schema = REQUIRED_FIELDS[category];
+  for (const field of schema.number) {
+    const value = def[field];
+    if (typeof value !== 'number' || !Number.isFinite(value)) fail(`${field} must be a finite number`);
+  }
+  for (const field of schema.string) {
+    if (typeof def[field] !== 'string' || def[field].length === 0) fail(`${field} must be a non-empty string`);
+  }
+  for (const field of schema.boolean) {
+    if (typeof def[field] !== 'boolean') fail(`${field} must be a boolean`);
+  }
+  for (const field of schema.object) {
+    if (!def[field] || typeof def[field] !== 'object') fail(`${field} must be an object`);
+  }
+
+  // Positive-value rules.
+  if (!(def.damage > 0)) fail('damage must be greater than 0');
+  if (!(def.switchTime > 0)) fail('switchTime must be greater than 0');
+  if (def.unlockWave < 1) fail('unlockWave must be at least 1');
+  if (!(def.moveSpeedMult > 0)) fail('moveSpeedMult must be greater than 0');
+
+  if (category === 'firearm') {
+    if (!(def.reloadTime > 0)) fail('reloadTime must be greater than 0');
+    if (!(def.fireRate > 0)) fail('fireRate must be greater than 0');
+    if (!(def.magazineSize >= 1)) fail('magazineSize must be at least 1');
+    if (!(def.startReserve >= def.magazineSize)) fail('startReserve must be >= magazineSize');
+    if (!(def.maxReserve >= def.startReserve)) fail('maxReserve must be >= startReserve');
+    if (!(def.pellets >= 1)) fail('pellets must be at least 1');
+    if (!(def.spread >= 0) || !(def.spread < Math.PI / 2)) fail('spread must be a small non-negative angle');
+    if (!(def.range > 0)) fail('range must be greater than 0');
+    if (!AMMO_KINDS.includes(def.ammoKind)) fail(`ammoKind must be one of ${AMMO_KINDS.join(', ')}`);
+    if (def.reloadMode !== 'magazine' && def.reloadMode !== 'shell') fail("reloadMode must be 'magazine' or 'shell'");
+    if (!(def.headshotMultiplier > 1)) fail('headshotMultiplier must be greater than 1');
+    if (def.penetration !== undefined && !(Number.isInteger(def.penetration) && def.penetration >= 0)) {
+      fail('penetration must be a non-negative integer when present');
+    }
+    if (def.falloff) {
+      if (!(def.falloff.start >= 0 && def.falloff.end > def.falloff.start)) fail('falloff end must be past its start');
+      if (!(def.falloff.min > 0 && def.falloff.min <= 1)) fail('falloff min must be in (0, 1]');
+    }
+  } else {
+    if (!(def.hitTime >= 0 && def.hitTime < def.attackDuration)) fail('hitTime must be inside the attack');
+    if (!(def.attackCooldown >= def.attackDuration)) fail('attackCooldown must outlast attackDuration');
+    if (!(def.reach > 0 && def.arcDegrees > 0)) fail('reach and arcDegrees must be greater than 0');
+    if (!(def.rayCount >= 1 && def.maxTargets >= 1)) fail('rayCount and maxTargets must be at least 1');
+  }
+
+  // A def may not mix firearm and melee fields: that is how "melee has no ammo"
+  // and "a firearm has no reach" stay true without special cases elsewhere.
+  for (const field of CATEGORY_ONLY_FIELDS[category === 'firearm' ? 'melee' : 'firearm']) {
+    if (def[field] !== undefined) fail(`${category} defs must not define ${field}`);
+  }
+
+  // Slot sanity + uniqueness inside the default loadout.
+  if (!Number.isInteger(def.slot) || def.slot < 1 || def.slot > SLOT_COUNT) {
+    fail(`slot must be an integer in 1..${SLOT_COUNT}`);
+  } else if (SLOT_CATEGORIES[def.slot - 1] !== category) {
+    fail(`slot ${def.slot} is a ${SLOT_CATEGORIES[def.slot - 1]} slot, not ${category}`);
+  } else if (loadout.includes(id)) {
+    for (const otherId of loadout) {
+      if (otherId === id) continue;
+      const other = allDefs[otherId];
+      if (other && other.slot === def.slot) fail(`slot ${def.slot} is already used by ${otherId} in the default loadout`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validates the whole table (ids matching their keys) and returns a report.
+ * @returns {{valid: boolean, errors: string[]}} errors are prefixed with the weapon id
+ */
+export function validateWeaponDefs(allDefs = WEAPON_DEFS, loadout = DEFAULT_LOADOUT) {
+  const errors = [];
+  for (const [key, def] of Object.entries(allDefs)) {
+    if (def.id !== key) errors.push(`${key}: id does not match its key (${String(def.id)})`);
+    for (const error of validateWeaponDef(def, allDefs, loadout).errors) errors.push(`${key}: ${error}`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Seconds to empty a full magazine and load the next one.
+ * Shell reloads insert one round at a time, so the whole tube takes
+ * `reloadTime * magazineSize`; magazine reloads are a single `reloadTime`.
+ */
+export function magazineCycleTime(def) {
+  if (def.category !== 'firearm') return 0;
+  const emptyTime = def.magazineSize / def.fireRate;
+  const reload = def.reloadMode === 'shell' ? def.reloadTime * def.magazineSize : def.reloadTime;
+  return emptyTime + reload;
+}
+
+/** Damage a full magazine can deal to one body, ignoring falloff and headshots. */
+export function magazineDamage(def) {
+  return def.category === 'firearm' ? def.damage * def.pellets * def.magazineSize : 0;
+}
+
+/**
+ * Sustained damage per second: a full magazine (all pellets on one body) over
+ * the time it takes to empty it and reload. This is the number the balance
+ * test bands; shotguns beat it in the first second of a fight, which is the
+ * whole point of a shotgun.
+ */
+export function sustainedDps(def) {
+  const cycle = magazineCycleTime(def);
+  return cycle > 0 ? magazineDamage(def) / cycle : 0;
+}
 
 /** Per-weapon ammo state. */
 class WeaponState {
@@ -326,6 +659,111 @@ function buildAxeModel() {
 }
 
 /**
+ * Parametric firearm viewmodel.
+ *
+ * The rifle and shotgun were hand-placed part by part; every gun after them is
+ * a spec table for this builder instead: a receiver plus optional primitives
+ * (barrel, handguard, magazine, stock, grip, rail, sight, accents) described as
+ * plain numbers. Parts are merged per material like the hand-built models, so a
+ * gun with 15 primitives is still a handful of draw calls.
+ *
+ * @param {object} spec
+ * @param {object} spec.colors            {body, frame, accent} hex colours
+ * @param {object} spec.receiver          {w,h,d,x?,y?,z?} main body box
+ * @param {Array}  [spec.barrels]         cylinders along -Z: {r0,r1,len,x?,y?,z?,color?}
+ *                                        (r0 = radius at the receiver, r1 = at the muzzle)
+ * @param {Array}  [spec.boxes]           extra boxes: {w,h,d,x?,y?,z?,rx?,rz?,color?}
+ * @param {object} [spec.muzzle]          {x?,y?,z?} muzzle marker; the flash sprite hangs on it
+ * @returns {{group: THREE.Group, muzzle: THREE.Object3D, barrelLength: number}}
+ */
+function buildParametricFirearm(spec) {
+  const group = new THREE.Group();
+  const colors = { body: 0x23282f, frame: 0x1a1d21, accent: 0xb71c1c, ...spec.colors };
+  const materials = {
+    body: mat(colors.body, { roughness: 0.45, metalness: 0.7 }),
+    frame: mat(colors.frame, { roughness: 0.85, metalness: 0.05 }),
+    accent: mat(colors.accent, { roughness: 0.45, metalness: 0.25 }),
+  };
+
+  const rec = spec.receiver;
+  const body = box(rec.w, rec.h, rec.d, materials.body);
+  body.position.set(rec.x || 0, rec.y || 0, rec.z || 0);
+  group.add(body);
+
+  for (const b of spec.barrels || []) {
+    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(b.r0, b.r1, b.len, 10), materials[b.color || 'body']);
+    barrel.rotation.x = Math.PI / 2;
+    barrel.position.set(b.x || 0, b.y || 0, b.z || 0);
+    group.add(barrel);
+  }
+  for (const p of spec.boxes || []) {
+    const part = box(p.w, p.h, p.d, materials[p.color || 'frame']);
+    part.position.set(p.x || 0, p.y || 0, p.z || 0);
+    if (p.rx) part.rotation.x = p.rx;
+    if (p.rz) part.rotation.z = p.rz;
+    group.add(part);
+  }
+
+  mergeMeshesByMaterial(group);
+  const muzzle = new THREE.Object3D();
+  const m = spec.muzzle || {};
+  muzzle.position.set(m.x || 0, m.y || 0, m.z ?? -(rec.d / 2 + 0.1));
+  group.add(muzzle);
+  return { group, muzzle, barrelLength: Math.abs(muzzle.position.z) };
+}
+
+/** S-9 VIPER: stubby, suppressed, a long magazine and a red stripe on the rail. */
+function buildSmgModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x272d35, frame: 0x191c20, accent: 0xc2321f },
+    receiver: { w: 0.072, h: 0.095, d: 0.3 },
+    barrels: [
+      { r0: 0.013, r1: 0.012, len: 0.16, y: 0.005, z: -0.22 },  // barrel
+      { r0: 0.021, r1: 0.02, len: 0.1, y: 0.005, z: -0.3 },     // stubby suppressor
+    ],
+    boxes: [
+      { w: 0.062, h: 0.05, d: 0.14, y: -0.004, z: -0.2 },              // handguard
+      { w: 0.026, h: 0.026, d: 0.24, y: 0.062, z: -0.03, color: 'body' }, // top rail
+      { w: 0.028, h: 0.05, d: 0.028, y: 0.1, z: -0.06 },               // front sight
+      { w: 0.05, h: 0.16, d: 0.058, y: -0.15, z: 0.01, rx: 0.16 },     // magazine
+      { w: 0.05, h: 0.1, d: 0.05, y: -0.1, z: 0.095, rx: -0.3 },       // grip
+      { w: 0.046, h: 0.055, d: 0.15, y: -0.005, z: 0.19 },             // folded stock
+      { w: 0.074, h: 0.01, d: 0.14, y: 0.026, z: -0.12, color: 'accent' }, // viper stripe
+    ],
+    muzzle: { x: 0, y: 0.005, z: -0.37 },
+  });
+}
+
+/** MKR-1 MARKSMAN: long heavy barrel, big scope, wooden-toned stock and rail. */
+function buildDmrModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x232a2a, frame: 0x151819, accent: 0x8a6b2b },
+    receiver: { w: 0.07, h: 0.105, d: 0.42 },
+    barrels: [
+      { r0: 0.015, r1: 0.012, len: 0.34, y: 0.008, z: -0.37 },  // heavy barrel
+      { r0: 0.022, r1: 0.019, len: 0.06, y: 0.008, z: -0.56 },  // muzzle brake
+      { r0: 0.026, r1: 0.026, len: 0.26, y: 0.098, z: -0.03 },  // scope tube
+      { r0: 0.02, r1: 0.024, len: 0.04, y: 0.098, z: -0.17 },   // objective bell
+    ],
+    boxes: [
+      { w: 0.068, h: 0.07, d: 0.26, y: -0.006, z: -0.28 },           // handguard
+      { w: 0.03, h: 0.03, d: 0.34, y: 0.072, z: -0.02, color: 'body' }, // rail
+      { w: 0.028, h: 0.05, d: 0.05, y: 0.062, z: -0.12 },            // front scope mount
+      { w: 0.028, h: 0.05, d: 0.05, y: 0.062, z: 0.08 },             // rear scope mount
+      { w: 0.05, h: 0.14, d: 0.08, y: -0.12, z: -0.04, rx: 0.08 },   // magazine
+      { w: 0.05, h: 0.12, d: 0.055, y: -0.11, z: 0.12, rx: -0.3 },   // grip
+      { w: 0.058, h: 0.09, d: 0.3, y: -0.012, z: 0.33, rx: -0.04 },  // butt stock
+      { w: 0.06, h: 0.03, d: 0.09, y: 0.045, z: 0.28 },              // cheek rest
+      { w: 0.072, h: 0.01, d: 0.2, y: 0.032, z: -0.1, color: 'accent' }, // brass accent
+    ],
+    muzzle: { x: 0, y: 0.008, z: -0.6 },
+  });
+}
+
+/** Damage each body behind the first takes, compounding: 60%, then 36%. */
+export const PENETRATION_DAMAGE_MULT = 0.6;
+
+/**
  * Damage multiplier for a hit at `distance` metres.
  * Full damage up to `falloff.start`, linear fall-off to `falloff.min` at `falloff.end`.
  */
@@ -336,6 +774,21 @@ export function computeFalloff(def, distance) {
   return 1 - (1 - min) * t;
 }
 
+/**
+ * One viewmodel factory per weapon id. Built once per WeaponSystem and shared
+ * by every loadout, so switching guns never builds geometry and
+ * Game.prewarmShaders() can compile the guns that are not even carried.
+ */
+const VIEWMODEL_BUILDERS = {
+  rifle: buildRifleModel,
+  shotgun: buildShotgunModel,
+  smg: buildSmgModel,
+  dmr: buildDmrModel,
+  knife: buildKnifeModel,
+  pipe: buildPipeModel,
+  axe: buildAxeModel,
+};
+
 export class WeaponSystem {
   /**
    * @param {object} opts
@@ -343,17 +796,17 @@ export class WeaponSystem {
    * @param {import('./audio.js').AudioManager} opts.audio
    * @param {import('./effects.js').EffectsManager} opts.effects
    * @param {import('./player.js').Player} opts.player
+   * @param {string[]} [opts.loadout]  weapon id per key (1-5); sanitized, defaults to WEAPON_ORDER
    * @param {object} opts.hooks  onShot(def), onEnemyHit({enemy,damage,headshot,point,distance,weapon}) -> {killed},
    *                             onSwitch(def), onReload(def), onMessage(text)
    */
-  constructor({ camera, audio, effects, player, hooks = {} }) {
+  constructor({ camera, audio, effects, player, loadout, hooks = {} }) {
     this.camera = camera;
     this.audio = audio;
     this.effects = effects;
     this.player = player;
     this.hooks = hooks;
 
-    this.states = WEAPON_ORDER.map((id) => new WeaponState(WEAPON_DEFS[id]));
     this.index = 0;
     this.switchTimer = 0;
     this.bloom = 0;
@@ -362,17 +815,13 @@ export class WeaponSystem {
     this.flashTimer = 0;
     this.shotCount = 0;
 
-    this.models = [
-      buildRifleModel(),
-      buildShotgunModel(),
-      buildKnifeModel(),
-      buildPipeModel(),
-      buildAxeModel(),
-    ];
     // Melee weapons are held by the first-person arm rig; firearms stay on the camera.
     this.melee = new MeleeViewmodel(camera);
     this.viewmodelVisible = true;
-    for (const m of this.models) {
+
+    this.viewmodels = new Map(WEAPON_IDS.map((id) => [id, VIEWMODEL_BUILDERS[id]?.() ?? null]));
+    for (const m of this.viewmodels.values()) {
+      if (!m) continue;
       m.group.visible = false;
       m.group.position.set(0.24, -0.24, -0.42);
       if (!m.muzzle) continue; // Only firearms have muzzle-flash sprites.
@@ -389,8 +838,11 @@ export class WeaponSystem {
       m.flash.position.set(0, 0, -0.04);
       m.muzzle.add(m.flash);
     }
-    this.models.forEach((_, i) => this.attachModel(i));
-    this.syncVisibility();
+
+    this.loadout = [];
+    this.states = [];
+    this.models = [];
+    this.setLoadout(loadout);
 
     this.raycaster = new THREE.Raycaster();
     this.raycaster.near = 0;
@@ -412,6 +864,32 @@ export class WeaponSystem {
     return this.states[this.index].def;
   }
 
+  /**
+   * Rebuilds the slots for a new loadout. Only safe between runs (menu/pause):
+   * ammo and the drawn weapon are reset, which a mid-fight swap must not do.
+   * @param {string[]} loadout  weapon id per key, sanitized against the current loadout
+   */
+  setLoadout(loadout) {
+    this.loadout = sanitizeLoadout(loadout, this.loadout);
+    this.states = this.loadout.map((id) => new WeaponState(WEAPON_DEFS[id]));
+    this.index = 0;
+    this.switchTimer = 0;
+    this.bloom = 0;
+    this.aimAmount = 0;
+    this.viewKick = 0;
+    this.flashTimer = 0;
+    this.shotCount = 0;
+    this.melee.reset();
+    this.bindModels();
+  }
+
+  /** Points the slot list at the viewmodels of the current loadout. */
+  bindModels() {
+    this.models = this.loadout.map((id) => this.viewmodels.get(id));
+    this.models.forEach((_, i) => this.attachModel(i));
+    this.syncVisibility();
+  }
+
   reset() {
     for (const s of this.states) s.reset();
     this.index = 0;
@@ -422,12 +900,14 @@ export class WeaponSystem {
     this.flashTimer = 0;
     this.melee.reset();
     this.viewmodelVisible = true;
-    this.models.forEach((m) => {
-      if (m.flash) {
+    // Every viewmodel, not just the carried ones: a gun may have flashed before
+    // a loadout change and must not come back with a stuck muzzle flash.
+    for (const m of this.viewmodels.values()) {
+      if (m?.flash) {
         m.flash.visible = false;
         m.flash.material.opacity = 0;
       }
-    });
+    }
     this.models.forEach((_, i) => this.attachModel(i));
     this.syncVisibility();
   }
@@ -456,7 +936,7 @@ export class WeaponSystem {
     this.melee.setVisible(visible && this.def.category === 'melee');
   }
 
-  /** Switches by slot index; firearms keep slots 1-2 and melee uses slots 3-5. */
+  /** Switches by slot index: key `index + 1`, whatever `loadout[index]` is. */
   requestSwitch(index) {
     if (index < 0 || index >= this.states.length || index === this.index) return false;
     const old = this.state;
@@ -535,7 +1015,8 @@ export class WeaponSystem {
     const materials = new Set();
     const textures = new Set();
     this.melee.dispose();
-    for (const model of this.models) {
+    for (const model of this.viewmodels.values()) {
+      if (!model) continue;
       model.group.removeFromParent();
       model.group.traverse((object) => {
         if (object.geometry) geometries.add(object.geometry);
@@ -560,7 +1041,10 @@ export class WeaponSystem {
     let added = false;
     for (const st of this.states) {
       if (st.def.category !== 'firearm') continue;
+      // A weapon without a pickup value simply keeps its reserve (every firearm
+      // has one today - the schema test enforces it).
       const amount = AMMO_PICKUP[st.def.id];
+      if (!amount) continue;
       const before = st.reserve;
       st.reserve = Math.min(st.def.maxReserve, st.reserve + amount);
       if (st.reserve > before) added = true;
@@ -805,47 +1289,39 @@ export class WeaponSystem {
         .addScaledVector(right, Math.cos(a) * r)
         .addScaledVector(up, Math.sin(a) * r)
         .normalize();
-      results.push(this.traceRay(origin, dir, def.range, ctx, hitboxes));
+      results.push(this.traceRay(origin, dir, def.range, ctx, hitboxes, def.penetration || 0));
     }
 
     // Resolve hits. Each enemy gets at most one blood burst per shot.
     const burstEnemies = new Set();
     let impacts = 0;
     let hitAnything = false;
-    let furthest = null;
     for (const res of results) {
       if (res.type === 'enemy') {
         hitAnything = true;
-        const falloff = this.falloffFor(def, res.distance);
-        const damage = def.damage * falloff * (res.headshot ? def.headshotMultiplier : 1);
-        const outcome = this.hooks.onEnemyHit?.({
-          enemy: res.enemy,
-          damage,
-          headshot: res.headshot,
-          point: res.point,
-          distance: res.distance,
-          weapon: def.id,
-        });
-        // One blood burst and one hit sound per enemy per shot (shotgun pellets).
-        if (!burstEnemies.has(res.enemy)) {
-          burstEnemies.add(res.enemy);
-          this.effects.spawnBlood(res.point, res.normal, res.headshot ? 1.6 : 1);
-          this.audio.playHitFlesh(res.headshot);
-        }
-        if (outcome?.killed) this.effects.spawnBlood(res.point, res.normal, 2);
-      } else if (res.type === 'world') {
-        if (impacts < 3) {
-          this.effects.spawnImpact(res.point, res.normal, res.surface, res.owner);
-          impacts++;
+        this.resolveEnemyHit(def, res, 1, burstEnemies);
+        // A penetrating round keeps going at a fraction of its damage
+        // (60%, then 36% if a weapon ever penetrates two bodies). Non-penetrating
+        // weapons never build the array, so ordinary shots pay nothing for it.
+        if (res.pierced) {
+          for (let i = 0; i < res.pierced.length; i++) {
+            this.resolveEnemyHit(def, res.pierced[i], PENETRATION_DAMAGE_MULT ** (i + 1), burstEnemies);
+          }
         }
       }
-      if (res.type !== 'miss' && (!furthest || res.distance > furthest.distance)) furthest = res;
+      // Where the bullet actually stopped: the wall right behind a pierced
+      // body gets the decal, and the tracer ends there too.
+      const stop = res.behind || res;
+      if (stop.type === 'world' && impacts < 3) {
+        this.effects.spawnImpact(stop.point, stop.normal, stop.surface, stop.owner);
+        impacts++;
+      }
     }
 
     // Visual + audio feedback for the shot itself.
     const muzzle = this.models[this.index].muzzle.getWorldPosition(this._muzzle);
     if (def.tracer) {
-      const end = results[0].point;
+      const end = results[0].behind ? results[0].behind.point : results[0].point;
       this.effects.spawnTracer(muzzle, end, 0xffd27a);
     }
     this.flashTimer = 0.05;
@@ -862,6 +1338,35 @@ export class WeaponSystem {
     this.hooks.onShot?.(def, hitAnything);
   }
 
+  /**
+   * Applies one enemy hit from a trace: falloff, headshot multiplier, the game's
+   * damage hook, blood and the flesh-hit sound. One blood burst and one sound per
+   * enemy per shot, however many pellets or pierced bodies were involved.
+   *
+   * @param {object} def         weapon def
+   * @param {object} hit         a traceRay() enemy result
+   * @param {number} scale       damage scale: 1 for the first body, less for pierced ones
+   * @param {Set<object>} burstEnemies  enemies already reported for this shot
+   */
+  resolveEnemyHit(def, hit, scale, burstEnemies) {
+    const falloff = this.falloffFor(def, hit.distance);
+    const damage = def.damage * scale * falloff * (hit.headshot ? def.headshotMultiplier : 1);
+    const outcome = this.hooks.onEnemyHit?.({
+      enemy: hit.enemy,
+      damage,
+      headshot: hit.headshot,
+      point: hit.point,
+      distance: hit.distance,
+      weapon: def.id,
+    });
+    if (!burstEnemies.has(hit.enemy)) {
+      burstEnemies.add(hit.enemy);
+      this.effects.spawnBlood(hit.point, hit.normal, hit.headshot ? 1.6 : 1);
+      this.audio.playHitFlesh(hit.headshot);
+    }
+    if (outcome?.killed) this.effects.spawnBlood(hit.point, hit.normal, 2);
+  }
+
   /** Damage multiplier for distance (shotgun falloff). */
   falloffFor(def, distance) {
     return computeFalloff(def, distance);
@@ -870,8 +1375,13 @@ export class WeaponSystem {
   /**
    * Finds what a ray hits first: enemy hitbox, world box, floor/ceiling, or nothing.
    * Returns { type: 'enemy'|'world'|'miss', point, normal, distance, enemy?, headshot? }.
+   *
+   * `penetration` lets the ray keep going through that many extra enemy bodies
+   * (the marksman round): the additional hits come back in `pierced`, and
+   * whatever finally stopped the ray in `behind`, so the tracer and the wall
+   * decal still land behind the bodies it went through.
    */
-  traceRay(origin, dir, range, ctx, hitboxes) {
+  traceRay(origin, dir, range, ctx, hitboxes, penetration = 0) {
     const o = { x: origin.x, y: origin.y, z: origin.z };
     const d = { x: dir.x, y: dir.y, z: dir.z };
     const worldHit = raycastBoxes(o, d, range, ctx.colliders);
@@ -889,28 +1399,65 @@ export class WeaponSystem {
       if (t > 0 && t < maxDist) { planeT = t; planeNormal = { x: 0, y: -1, z: 0 }; surface = 'ceiling'; }
     }
     if (planeT < maxDist) maxDist = planeT;
+    // The wall/floor result is only built when the ray is not stopped by a body,
+    // so the ordinary single-hit path allocates exactly what it used to.
+    const plane = planeT < Infinity ? { t: planeT, normal: planeNormal, surface } : null;
 
     // Enemy hitboxes (nearest targetable one that is closer than the wall).
     this.raycaster.set(origin, dir);
     this.raycaster.far = maxDist;
     const hits = this.raycaster.intersectObjects(hitboxes, false);
+
+    if (penetration <= 0) {
+      for (const hit of hits) {
+        const enemy = hit.object.userData.enemy;
+        if (!enemy || !enemy.isTargetable()) continue;
+        return this.enemyHitResult(hit, dir);
+      }
+      return this.stopResult(origin, dir, range, worldHit, plane);
+    }
+
+    // Penetrating shot: walk the (distance-sorted) hits and keep one result per
+    // enemy - a body and a head box belong to the same target, so they must not
+    // both count as bodies to shoot through.
+    const got = [];
     for (const hit of hits) {
       const enemy = hit.object.userData.enemy;
       if (!enemy || !enemy.isTargetable()) continue;
-      return {
-        type: 'enemy',
-        enemy,
-        headshot: hit.object.name === 'hitbox-head',
-        point: hit.point.clone(),
-        normal: { x: -dir.x, y: -dir.y, z: -dir.z },
-        distance: hit.distance,
-      };
+      if (got.some((result) => result.enemy === enemy)) continue;
+      got.push(this.enemyHitResult(hit, dir));
+      if (got.length > penetration) break;
     }
+    if (got.length === 0) return this.stopResult(origin, dir, range, worldHit, plane);
+    const primary = got[0];
+    primary.pierced = got.slice(1);
+    primary.behind = this.stopResult(origin, dir, range, worldHit, plane);
+    return primary;
+  }
 
-    if (planeT < Infinity && planeT <= (worldHit ? worldHit.distance : Infinity)) {
-      const point = new THREE.Vector3(origin.x + dir.x * planeT, origin.y + dir.y * planeT, origin.z + dir.z * planeT);
+  /** One enemy hit, in the shape a non-penetrating traceRay() returns. */
+  enemyHitResult(hit, dir) {
+    return {
+      type: 'enemy',
+      enemy: hit.object.userData.enemy,
+      headshot: hit.object.name === 'hitbox-head',
+      point: hit.point.clone(),
+      normal: { x: -dir.x, y: -dir.y, z: -dir.z },
+      distance: hit.distance,
+    };
+  }
+
+  /**
+   * Result for a ray that met no (further) targetable enemy: the world box, the
+   * floor/ceiling plane, or nothing within range.
+   *
+   * @param {object} plane  floor/ceiling slab test {t, normal, surface}, or null
+   */
+  stopResult(origin, dir, range, worldHit, plane) {
+    if (plane && plane.t <= (worldHit ? worldHit.distance : Infinity)) {
+      const point = new THREE.Vector3(origin.x + dir.x * plane.t, origin.y + dir.y * plane.t, origin.z + dir.z * plane.t);
       // Floor and ceiling never move, so these marks have no owner.
-      return { type: 'world', point, normal: planeNormal, distance: planeT, surface, owner: null };
+      return { type: 'world', point, normal: plane.normal, distance: plane.t, surface: plane.surface, owner: null };
     }
     if (worldHit) {
       const p = worldHit.point;
@@ -986,7 +1533,7 @@ export class WeaponSystem {
       attacking: st.attacking,
       reloading: st.reloading,
       switching: this.switchTimer > 0,
-      slot: st.def.slot,
+      slot: this.index + 1, // the live key, not the def's default slot
       auto: st.def.auto,
     };
   }

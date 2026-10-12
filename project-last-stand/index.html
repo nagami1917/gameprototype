@@ -73,13 +73,8 @@
       <div class="weapon-name" id="hud-weapon">MX-7 ASSAULT RIFLE</div>
       <div class="ammo"><span id="hud-ammo">30</span><span class="ammo-reserve">/ <span id="hud-reserve">120</span></span></div>
       <div class="weapon-status" id="hud-status"></div>
-      <div class="slots">
-        <span data-slot="1" class="slot">1 RIFLE</span>
-        <span data-slot="2" class="slot">2 SHOTGUN</span>
-        <span data-slot="3" class="slot">3 KNIFE</span>
-        <span data-slot="4" class="slot">4 PIPE</span>
-        <span data-slot="5" class="slot">5 AXE</span>
-      </div>
+      <!-- Filled by ui.setLoadout(): one chip per key of the live loadout. -->
+      <div class="slots" id="hud-slots"></div>
     </div>
 
     <div class="banner" id="banner" aria-live="polite">
@@ -100,6 +95,7 @@
       </div>
       <nav class="menu-buttons" aria-label="Main menu buttons">
         <button class="btn btn-primary" id="btn-play" type="button">PLAY</button>
+        <button class="btn" id="btn-loadout" type="button">LOADOUT</button>
         <button class="btn" id="btn-settings" type="button">SETTINGS</button>
         <button class="btn" id="btn-controls" type="button">CONTROLS</button>
         <button class="btn" id="btn-credits" type="button">CREDITS</button>
@@ -109,6 +105,20 @@
         <div class="record"><span>HIGHEST WAVE</span><strong id="menu-high-wave">0</strong></div>
       </div>
       <p class="menu-hint">Click PLAY to capture the mouse. Navigate with the arrow keys and Enter.</p>
+    </div>
+  </section>
+
+  <!-- Loadout (main menu): which weapon each key 1-5 draws -->
+  <section class="screen hidden" id="screen-loadout" data-screen="loadout" aria-label="Loadout">
+    <div class="panel sub-panel">
+      <h2 class="screen-title">LOADOUT</h2>
+      <p class="pause-note">Keys 1–5 draw the weapon in that slot. Firearms fill slots 1–2, melee weapons slots 3–5.</p>
+      <!-- Filled by ui.writeLoadoutControls() from the WEAPON_DEFS table. -->
+      <div class="settings-grid" id="loadout-grid"></div>
+      <p class="setting-note">The loadout is saved automatically in this browser.</p>
+      <div class="button-row">
+        <button class="btn btn-primary" id="btn-loadout-back" type="button">BACK</button>
+      </div>
     </div>
   </section>
 
@@ -167,7 +177,7 @@
           <tr><th>Shift</th><td>Sprint forward (uses stamina)</td></tr>
           <tr><th>Space</th><td>Jump (firearms); swing the melee weapon (knife, pipe, axe)</td></tr>
           <tr><th>Shift + A/S/D, then Space</th><td>Dash left / backward / right (uses stamina)</td></tr>
-          <tr><th>1–5</th><td>Switch weapon: rifle, shotgun, knife, pipe, axe</td></tr>
+          <tr><th>1–5</th><td>Switch weapon: whatever the LOADOUT screen put in that slot</td></tr>
           <tr><th>Esc</th><td>Pause / release mouse</td></tr>
         </tbody>
       </table>

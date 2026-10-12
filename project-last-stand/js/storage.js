@@ -1,10 +1,11 @@
 /**
  * storage.js
  * ------------------------------------------------------------------
- * LocalStorage persistence for high scores and player settings.
- * Every access is wrapped in try/catch: privacy modes or disabled storage
- * must never break the game; we simply fall back to defaults.
+ * LocalStorage persistence for high scores, player settings and the
+ * loadout. Every access is wrapped in try/catch: privacy modes or disabled
+ * storage must never break the game; we simply fall back to defaults.
  */
+import { sanitizeLoadout } from './weapon.js';
 
 export const STORAGE_KEY = 'project-last-stand:v1';
 
@@ -62,6 +63,9 @@ export function loadStorage() {
     bestKills: Math.max(0, Number(parsed.bestKills) || 0),
     runs: Math.max(0, Number(parsed.runs) || 0),
     settings: sanitizeSettings(parsed.settings),
+    // Slots 1-5; a save from an older build or a tampered one falls back to
+    // the default kit instead of breaking the weapon system.
+    loadout: sanitizeLoadout(parsed.loadout),
   };
 }
 

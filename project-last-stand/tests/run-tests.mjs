@@ -362,6 +362,8 @@ async function main() {
 
   /* ---------------- weapons ---------------- */
   const weapon = await import(pathToFileURL(path.join(JS_DIR, 'weapon.js')).href);
+  const enemyDefs = await import(pathToFileURL(path.join(JS_DIR, 'enemy.js')).href);
+  const audio = await import(pathToFileURL(path.join(JS_DIR, 'audio.js')).href);
   console.log('\nWeapons');
 
   test('shotgun falloff: full damage at 7 m, 30% at 26 m, linear between', () => {
@@ -406,6 +408,222 @@ async function main() {
     assertEqual(weapon.WEAPON_DEFS.shotgun.pellets, 9, 'shotgun pellets');
     assert(weapon.WEAPON_DEFS.rifle.auto === true, 'rifle should be automatic');
     assert(weapon.WEAPON_DEFS.shotgun.auto === false, 'shotgun should not be automatic');
+  });
+
+  /* ---------------- weapon schema ---------------- */
+  console.log('\nWeapon schema');
+
+  test('every def in WEAPON_DEFS passes validateWeaponDef', () => {
+    const report = weapon.validateWeaponDefs();
+    assert(report.valid, `schema errors:\n       ${report.errors.join('\n       ')}`);
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      const own = weapon.validateWeaponDef(def);
+      assert(own.valid, `${id} must validate on its own: ${own.errors.join('; ')}`);
+      assertEqual(def.id, id, `${id} id must match its key`);
+    }
+  });
+
+  test('firearms declare ammo kinds, slot defaults and the reserved tuning fields', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      assert(weapon.AMMO_KINDS.includes(def.ammoKind) || def.category === 'melee',
+        `${id} needs an ammoKind from AMMO_KINDS`);
+      assert(def.unlockWave >= 1, `${id} unlockWave`);
+      assert(def.moveSpeedMult > 0, `${id} moveSpeedMult`);
+      if (def.category === 'firearm') assert(def.adsZoom > 0, `${id} adsZoom`);
+      else assertEqual(def.ammoKind, undefined, `${id} is melee and must not carry an ammo kind`);
+    }
+    assertEqual(weapon.WEAPON_DEFS.rifle.ammoKind, 'rifle', 'rifle ammo kind');
+    assertEqual(weapon.WEAPON_DEFS.shotgun.ammoKind, 'shell', 'shotgun ammo kind');
+  });
+
+  test('validateWeaponDef reports the broken field instead of throwing', () => {
+    const rifle = weapon.WEAPON_DEFS.rifle;
+    const knife = weapon.WEAPON_DEFS.knife;
+    const bad = (patch) => weapon.validateWeaponDef({ ...rifle, recoil: { ...rifle.recoil }, ...patch });
+    const badMelee = (patch) => weapon.validateWeaponDef({ ...knife, ...patch });
+
+    assert(bad({ damage: 0 }).errors.some((e) => e.includes('damage')), 'zero damage');
+    assert(bad({ damage: -5 }).errors.some((e) => e.includes('damage')), 'negative damage');
+    assert(bad({ startReserve: 10 }).errors.some((e) => e.includes('startReserve')), 'reserve under a magazine');
+    assert(bad({ reloadTime: 0 }).errors.some((e) => e.includes('reloadTime')), 'zero reload time');
+    assert(bad({ ammoKind: 'plasma' }).errors.some((e) => e.includes('ammoKind')), 'unknown ammo kind');
+    assert(bad({ magazineSize: 0 }).errors.some((e) => e.includes('magazineSize')), 'empty magazine');
+    assert(bad({ reach: 2 }).errors.some((e) => e.includes('reach')), 'firearm must not define melee fields');
+    assert(bad({ slot: 2 }).errors.some((e) => e.includes('shotgun')), 'slot clashes with the default loadout');
+    assert(bad({ slot: 4 }).errors.some((e) => e.includes('slot')), 'firearm in a melee slot');
+    assert(bad({ slot: 9 }).errors.some((e) => e.includes('slot')), 'slot out of range');
+    assert(bad({ headshotMultiplier: 1 }).errors.some((e) => e.includes('headshotMultiplier')), 'no headshot bonus');
+    assert(badMelee({ magazineSize: 8 }).errors.some((e) => e.includes('magazineSize')), 'melee must not define a magazine');
+    assert(badMelee({ attackCooldown: 0.1 }).errors.some((e) => e.includes('attackCooldown')), 'cooldown inside the swing');
+    assert(badMelee({ damage: 'lots' }).errors.some((e) => e.includes('damage')), 'damage must be a number');
+    assert(bad({ unlockWave: 0 }).errors.some((e) => e.includes('unlockWave')), 'unlockWave starts at 1');
+    assertEqual(bad({}).errors.length, 0, 'an untouched clone is still valid');
+  });
+
+  test('the default loadout mirrors the legacy weapon order and slot categories', () => {
+    assertEqual(weapon.DEFAULT_LOADOUT.join(','), weapon.WEAPON_ORDER.join(','), 'default loadout');
+    assertEqual(weapon.SLOT_COUNT, 5, 'five slots');
+    assertEqual(weapon.SLOT_CATEGORIES.length, weapon.SLOT_COUNT, 'one category per slot');
+    weapon.DEFAULT_LOADOUT.forEach((id, i) => {
+      assertEqual(weapon.WEAPON_DEFS[id].category, weapon.SLOT_CATEGORIES[i], `slot ${i + 1} accepts the right category`);
+      assertEqual(weapon.WEAPON_DEFS[id].slot, i + 1, `${id} keeps its default slot`);
+    });
+    assertEqual(weapon.hudSlotLabels().join('|'), '1 RIFLE|2 SHOTGUN|3 KNIFE|4 PIPE|5 AXE', 'HUD labels');
+  });
+
+  test('sanitizeLoadout drops duplicates, unknown ids and wrong-category picks', () => {
+    const clean = weapon.sanitizeLoadout(['shotgun', 'shotgun', 'axe', 'nope', 'axe']);
+    assertEqual(clean.length, weapon.SLOT_COUNT, 'always five slots');
+    assertEqual(new Set(clean).size, weapon.SLOT_COUNT, 'no weapon occupies two slots');
+    assertEqual(clean[0], 'shotgun', 'a legal pick is kept');
+    assertEqual(clean[1], 'rifle', 'a duplicate firearm falls back to the default');
+    assertEqual(clean[2], 'axe', 'a legal melee pick is kept');
+    assertEqual(clean[3], 'pipe', 'an unknown id falls back');
+    assertEqual(clean[4], 'knife', 'a duplicate melee falls back to a free weapon');
+
+    // Category bands: a firearm in a melee slot (and the reverse) is rejected.
+    assertEqual(weapon.sanitizeLoadout(['axe', 'pipe', 'rifle', 'shotgun', 'knife']).join(','),
+      weapon.DEFAULT_LOADOUT.join(','), 'wrong-category picks fall back');
+    // Short, missing and nonsense input keeps the rest of the kit.
+    assertEqual(weapon.sanitizeLoadout(['shotgun']).join(','), 'shotgun,rifle,knife,pipe,axe', 'short array');
+    assertEqual(weapon.sanitizeLoadout(undefined).join(','), weapon.DEFAULT_LOADOUT.join(','), 'undefined input');
+    assertEqual(weapon.sanitizeLoadout('rifle').join(','), weapon.DEFAULT_LOADOUT.join(','), 'non-array input');
+    assertEqual(weapon.sanitizeLoadout(null, ['nope']).join(','), weapon.DEFAULT_LOADOUT.join(','), 'bogus fallback');
+  });
+
+  test('loadoutSlotOptions offers only weapons that fit the slot', () => {
+    const slots = weapon.loadoutSlotOptions();
+    assertEqual(slots.length, weapon.SLOT_COUNT, 'one entry per key');
+    for (const slot of slots) {
+      assert(slot.options.length >= 2, `${slot.name} needs choices`);
+      for (const option of slot.options) {
+        assertEqual(weapon.WEAPON_DEFS[option.id].category, slot.category, `${option.id} in ${slot.name}`);
+        assert(option.unlockWave >= 1, `${option.id} carries its unlock wave`);
+      }
+    }
+    assertEqual(slots[0].category, 'firearm', 'slot 1 is a firearm slot');
+    assertEqual(slots[2].category, 'melee', 'slot 3 is a melee slot');
+    const offered = new Set(slots.flatMap((s) => s.options.map((o) => o.id)));
+    assertEqual(offered.size, Object.keys(weapon.WEAPON_DEFS).length, 'every weapon is offered somewhere');
+  });
+
+  test('the S-9 VIPER and MKR-1 MARKSMAN match the roadmap stats', () => {
+    const smg = weapon.WEAPON_DEFS.smg;
+    assertEqual(smg.name, 'S-9 VIPER SMG', 'SMG name');
+    assertEqual(smg.category, 'firearm', 'SMG category');
+    assertEqual(smg.ammoKind, 'rifle', 'SMG shares rifle ammo');
+    assertEqual(smg.damage, 15, 'SMG damage');
+    assertEqual(smg.fireRate, 14, 'SMG fire rate');
+    assertEqual(smg.magazineSize, 35, 'SMG magazine');
+    assertEqual(smg.startReserve, 210, 'SMG reserve');
+    assertEqual(smg.reloadTime, 1.6, 'SMG reload');
+    assertEqual(smg.spread, 0.014, 'SMG spread');
+    assertEqual(smg.auto, true, 'SMG is automatic');
+    assert(smg.maxBloom > smg.spread, 'SMG bloom must visibly widen the cone');
+    assert(smg.switchTime <= 0.3, 'SMG has the fastest draw');
+    assert(smg.falloff && smg.falloff.min < 1, 'SMG is a close-mid weapon');
+
+    const dmr = weapon.WEAPON_DEFS.dmr;
+    assertEqual(dmr.name, 'MKR-1 MARKSMAN', 'DMR name');
+    assertEqual(dmr.category, 'firearm', 'DMR category');
+    assertEqual(dmr.ammoKind, 'rifle', 'DMR shares rifle ammo');
+    assertEqual(dmr.damage, 68, 'DMR damage');
+    assertEqual(dmr.fireRate, 2.2, 'DMR fire rate');
+    assertEqual(dmr.magazineSize, 12, 'DMR magazine');
+    assertEqual(dmr.startReserve, 72, 'DMR reserve');
+    assertEqual(dmr.reloadTime, 2.4, 'DMR reload');
+    assertEqual(dmr.headshotMultiplier, 2.5, 'DMR headshot multiplier');
+    assertEqual(dmr.range, 200, 'DMR range');
+    assertEqual(dmr.penetration, 1, 'DMR penetrates one body');
+    assertEqual(dmr.auto, false, 'DMR is semi-automatic');
+    assertEqual(dmr.falloff, null, 'DMR has no distance falloff');
+    assert(dmr.damage * dmr.headshotMultiplier >= enemyDefs.ENEMY_TYPES.runner.maxHealth,
+      'a marksman headshot drops a runner');
+
+    // Tuning guardrails: the two guns must not outclass the originals at what
+    // those originals are for.
+    const rifle = weapon.WEAPON_DEFS.rifle;
+    assert(smg.switchTime < rifle.switchTime, 'the SMG draws faster than the rifle');
+    assert(dmr.range > rifle.range, 'the DMR reaches further than the rifle');
+    assert(dmr.fireRate < rifle.fireRate && smg.fireRate > rifle.fireRate, 'rate of fire splits the roles');
+  });
+
+  test('every firearm has an ammo pickup amount and a shot profile', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') {
+        assertEqual(weapon.AMMO_PICKUP[id], undefined, `${id} must not receive ammo pickups`);
+        continue;
+      }
+      assert(weapon.AMMO_PICKUP[id] > 0, `${id} needs an AMMO_PICKUP amount`);
+      const profile = audio.shotProfile(def.sound);
+      assert(profile && profile.body, `${id} (sound '${def.sound}') needs a SHOT_PROFILES row`);
+    }
+    assert(weapon.AMMO_PICKUP.smg > weapon.AMMO_PICKUP.dmr, 'SMG ammo is the common kind');
+  });
+
+  test('the rifle and shotgun shot profiles are the ones the game already had', () => {
+    const { SHOT_PROFILES, shotProfile } = audio;
+    const rifle = SHOT_PROFILES.rifle;
+    assertEqual(rifle.noise.length, 2, 'rifle had two noise layers');
+    assertEqual(rifle.noise[0].filter, 'bandpass', 'rifle crack filter');
+    assertEqual(rifle.noise[0].freq, 1400, 'rifle crack frequency');
+    assertEqual(rifle.noise[1].freq, 3500, 'rifle snap frequency');
+    assertEqual(rifle.body.f0, 140, 'rifle body blip start');
+    assertEqual(rifle.body.f1, 45, 'rifle body blip end');
+    assertEqual(rifle.body.decay, 0.12, 'rifle body blip decay');
+
+    const shotgun = SHOT_PROFILES.shotgun;
+    assertEqual(shotgun.noise.length, 1, 'shotgun had one noise layer');
+    assertEqual(shotgun.noise[0].filter, 'lowpass', 'shotgun boom filter');
+    assertEqual(shotgun.noise[0].freq, 2600, 'shotgun boom frequency');
+    assertEqual(shotgun.noise[0].sweepTo, 400, 'shotgun boom sweep');
+    assertEqual(shotgun.noise[0].decay, 0.28, 'shotgun boom decay');
+    assertEqual(shotgun.body.f0, 110, 'shotgun body blip start');
+
+    assertEqual(shotProfile('nope'), rifle, 'an unknown sound falls back to the rifle');
+    const signatures = ['rifle', 'shotgun', 'smg', 'dmr'].map((k) => JSON.stringify(SHOT_PROFILES[k]));
+    assertEqual(new Set(signatures).size, signatures.length, 'every gun must sound different');
+  });
+
+  test('sustained DPS of every firearm sits inside the 60-160 band', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') {
+        assertEqual(weapon.sustainedDps(def), 0, `${id} is melee and has no dps`);
+        continue;
+      }
+      const dps = weapon.sustainedDps(def);
+      assert(dps >= 60 && dps <= 160, `${id}: ${dps.toFixed(1)} sustained dps is outside 60-160`);
+    }
+    // Reference points from the roadmap: the rifle is the yardstick at ~142 and
+    // the shotgun trades average dps for burst.
+    assertNear(weapon.sustainedDps(weapon.WEAPON_DEFS.rifle), 142, 1, 'rifle sustained dps');
+    const shotgun = weapon.WEAPON_DEFS.shotgun;
+    assertNear(weapon.sustainedDps(shotgun), 78, 1, 'shotgun sustained dps (whole tube reloaded)');
+    // The shotgun's burst is the exception the band ignores: a single shell
+    // carries more damage than any other weapon's shot.
+    const oneBlast = weapon.magazineDamage(shotgun) / shotgun.magazineSize;
+    for (const def of Object.values(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm' || def.id === 'shotgun') continue;
+      assert(oneBlast > def.damage * (def.pellets || 1), `shotgun blast should out-damage ${def.id}`);
+    }
+  });
+
+  test('no firearm body-shots an armored infected at wave-1 health', () => {
+    const armored = enemyDefs.ENEMY_TYPES.armored;
+    const wave1Health = wm.getWaveConfig(1).multipliers.health; // every later wave only adds health
+    const health = armored.maxHealth * wave1Health;
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') continue;
+      // Enemy.takeDamage() rounds per hit, so shotguns must be counted pellet
+      // by pellet - that is the worst case for the armour, and it still holds.
+      const perHit = Math.max(1, Math.round(def.damage * (1 - armored.armor)));
+      const triggerDamage = perHit * (def.pellets || 1);
+      assert(triggerDamage < health,
+        `${id}: one trigger pull deals ${triggerDamage} to armour, which one-shots ${health} hp`);
+    }
+    // Armour only ever reduces body shots, so headshots remain the answer.
+    const rifleHead = weapon.WEAPON_DEFS.rifle.damage * weapon.WEAPON_DEFS.rifle.headshotMultiplier;
+    assert(rifleHead > weapon.WEAPON_DEFS.rifle.damage, 'headshots ignore armour and must still beat a body shot');
   });
 
   test('melee attacks are unlimited, edge-triggered, and blocked by walls', () => {
@@ -663,6 +881,217 @@ async function main() {
     });
   });
 
+  /* ---------------- loadout slots ---------------- */
+  console.log('\nLoadout slots');
+
+  /** A WeaponSystem with the minimal stubs, for any loadout. */
+  function makeWeaponSystem(loadout) {
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 1.5, 0);
+    camera.lookAt(0, 1.5, -1);
+    camera.updateMatrixWorld(true);
+    const system = new weapon.WeaponSystem({
+      camera,
+      loadout,
+      audio: {
+        playSwitch() {}, playDryFire() {}, playReload() {}, playShot() {}, playHitFlesh() {}, playMeleeSwing() {},
+      },
+      effects: { spawnBlood() {}, spawnImpact() {}, spawnTracer() {} },
+      player: { addRecoil() {}, addTrauma() {} },
+      hooks: {},
+    });
+    return { camera, system };
+  }
+
+  test('WeaponSystem builds its slots from the loadout, so keys 1-5 follow it', () => {
+    withDocumentStub(() => {
+      const { camera, system } = makeWeaponSystem(['shotgun', 'rifle', 'axe', 'knife', 'pipe']);
+      try {
+        assertEqual(system.loadout.join(','), 'shotgun,rifle,axe,knife,pipe', 'loadout applied in order');
+        assertEqual(system.states[0].def.id, 'shotgun', 'slot 1 is the shotgun');
+        assertEqual(system.states[0].ammo, weapon.WEAPON_DEFS.shotgun.magazineSize, 'ammo state follows the weapon');
+        assertEqual(system.models[0].group.parent, camera, 'the shotgun viewmodel is drawn first');
+        assertEqual(system.getHudData().slot, 1, 'the HUD shows the live key, not the def slot');
+
+        assertEqual(system.requestSwitch(2), true, 'key 3 works');
+        assertEqual(system.def.id, 'axe', 'key 3 draws the axe');
+        assertEqual(system.getHudData().slot, 3, 'HUD key');
+        assertEqual(system.models[2].group.parent, system.melee.socket, 'melee viewmodels use the arm rig');
+        assertEqual(system.requestSwitch(4), true, 'key 5 works');
+        assertEqual(system.def.id, 'pipe', 'key 5 draws the pipe');
+        assertEqual(system.requestSwitch(5), false, 'there is no key 6');
+
+        system.setLoadout(weapon.DEFAULT_LOADOUT);
+        assertEqual(system.loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'loadout swapped');
+        assertEqual(system.states[0].def.id, 'rifle', 'states rebuilt for the new slots');
+        assertEqual(system.index, 0, 'slot 1 is drawn after a swap');
+        assertEqual(system.models[1].group.parent, camera, 'every slot is attached again');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('a custom loadout never leaks a weapon into two slots or the wrong category', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem(['shotgun', 'shotgun', 'axe', 'axe', 'axe']);
+      try {
+        assertEqual(new Set(system.loadout).size, weapon.SLOT_COUNT, 'every slot holds a different weapon');
+        for (let i = 0; i < weapon.SLOT_COUNT; i++) {
+          assertEqual(system.states[i].def.category, weapon.SLOT_CATEGORIES[i], `slot ${i + 1} category`);
+        }
+        const before = system.loadout.join(',');
+        system.setLoadout(['nope', 'nope', 'nope', 'nope', 'nope']);
+        assertEqual(system.loadout.join(','), before, 'an all-garbage pick keeps the current kit');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  /* ---------------- new firearms ---------------- */
+  console.log('\nNew firearms');
+
+  /** A system drawn on the DMR (slot 2) with one target box per enemy down -Z. */
+  function makeRange(loadout = ['rifle', 'dmr', 'knife', 'pipe', 'axe'], slot = 1) {
+    const { system } = makeWeaponSystem(loadout);
+    const hits = [];
+    const impulses = [];
+    const nearEnemy = { isTargetable: () => true, name: 'near' };
+    const farEnemy = { isTargetable: () => true, name: 'far' };
+    const target = (z, enemy) => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1, 0.45), new THREE.MeshBasicMaterial());
+      mesh.position.set(0, 1.5, z);
+      mesh.userData.enemy = enemy;
+      mesh.updateMatrixWorld(true);
+      return mesh;
+    };
+    const near = target(-2, nearEnemy);
+    const far = target(-6, farEnemy);
+    system.hooks.onEnemyHit = (info) => { hits.push(info); return { killed: false }; };
+    system.effects.spawnImpact = (point, normal, surface, owner) => impulses.push({ point, surface, owner });
+    const ctx = { canFire: true, colliders: [], hitboxes: () => [near, far], speedFactor: 0, bobPhase: 0, dt: 0 };
+    system.requestSwitch(slot);
+    system.update(0.7, {}, ctx); // finish the draw
+    return { system, hits, impulses, ctx, nearEnemy, farEnemy };
+  }
+
+  test('every weapon id has a viewmodel, and the new guns have muzzle anchors', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem();
+      try {
+        for (const id of weapon.WEAPON_IDS) {
+          const model = system.viewmodels.get(id);
+          assert(model && model.group, `${id} needs a viewmodel`);
+        }
+        for (const id of ['rifle', 'shotgun', 'smg', 'dmr']) {
+          const model = system.viewmodels.get(id);
+          assert(model.muzzle, `${id} needs a muzzle marker for its flash sprite`);
+          assert(model.flash?.isSprite, `${id} needs a muzzle flash sprite`);
+          assert(model.barrelLength > 0.2, `${id} barrel length`);
+        }
+        // The parametric builder merges its primitives per material, so a
+        // spec with 15 parts is still a handful of meshes.
+        const materials = new Set();
+        let meshes = 0;
+        system.viewmodels.get('dmr').group.traverse((o) => {
+          if (!o.isMesh) return;
+          meshes++;
+          materials.add(o.material);
+        });
+        // 15 primitives in the spec, merged down to one mesh per palette colour.
+        assert(meshes <= 4, `DMR should merge its parts (got ${meshes} meshes)`);
+        assert(materials.size <= 3, `DMR should reuse its palette (got ${materials.size} materials)`);
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('traceRay penetrates one body, reports where the round stopped, and is unchanged otherwise', () => {
+    withDocumentStub(() => {
+      const { system, ctx } = makeRange();
+      try {
+        const origin = new THREE.Vector3(0, 1.5, 0);
+        const dir = new THREE.Vector3(0, 0, -1);
+        const pierced = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes(), 1);
+        assertEqual(pierced.type, 'enemy', 'the nearest body is the primary hit');
+        assertEqual(pierced.pierced.length, 1, 'the body behind it is pierced');
+        assert(pierced.pierced[0].distance > pierced.distance, 'the pierced hit is further away');
+        assertEqual(pierced.behind.type, 'miss', 'nothing stopped the round inside its range');
+
+        // Without penetration the ray behaves exactly as before.
+        const single = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes());
+        assertEqual(single.type, 'enemy', 'default trace still stops on a body');
+        assertEqual(single.pierced, undefined, 'default trace builds no pierced list');
+        assertEqual(single.behind, undefined, 'default trace builds no behind result');
+
+        // A wall between the two bodies ends the round there.
+        ctx.colliders = [createBox(-3, 0, -4.2, 3, 4, -3.8, 'wall')];
+        const blocked = system.traceRay(origin, dir, 200, ctx, ctx.hitboxes(), 1);
+        assertEqual(blocked.pierced.length, 0, 'a wall stops the round');
+        assertEqual(blocked.behind.type, 'world', 'the wall is what stopped it');
+        assertNear(blocked.behind.distance, 3.8, 0.01, 'wall distance');
+        assertEqual(blocked.behind.surface, 'concrete', 'wall surface drives the decal');
+        assertEqual(blocked.behind.owner, null, 'static walls own no decals');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('a DMR shot deals 60% behind the first body and still marks the wall', () => {
+    withDocumentStub(() => {
+      const { system, hits, impulses, ctx } = makeRange();
+      try {
+        system.update(0.016, { firePressed: true }, ctx);
+        assertEqual(hits.length, 2, 'one trigger pull hits two bodies');
+        assertEqual(hits[0].weapon, 'dmr', 'the hit reports the marksman');
+        assertEqual(hits[0].damage, 68, 'the first body takes full damage');
+        assertNear(hits[1].damage, 68 * weapon.PENETRATION_DAMAGE_MULT, 1e-9, 'the body behind takes 60%');
+        assertEqual(hits[1].distance > hits[0].distance, true, 'the pierced body is further away');
+        assertEqual(impulses.length, 0, 'nothing was hit behind the bodies, so no impact');
+
+        // Wall right behind the pair: the round still stops there and marks it.
+        ctx.colliders = [createBox(-3, 0, -7.5, 3, 4, -7.2, 'wall')];
+        system.update(0.7, {}, ctx); // clear the cooldown
+        system.update(0.016, { firePressed: true }, ctx);
+        assertEqual(hits.length, 4, 'the wall does not block the two bodies in front of it');
+        assertEqual(impulses.length, 1, 'the wall behind the bodies takes the decal');
+        assertNear(impulses[0].point.z, -7.2, 0.05, 'decal sits on the wall face');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('the SMG sprays faster than the rifle, blooms hard and hits for its 15 a round', () => {
+    withDocumentStub(() => {
+      // One second of held trigger at 60 fps, once with each automatic weapon.
+      const spray = (loadout) => {
+        const { system, hits, ctx } = makeRange(loadout, 0);
+        for (let i = 0; i < 60; i++) system.update(1 / 60, { fireHeld: true }, ctx);
+        const result = { shots: system.shotCount, ammo: system.state.ammo, hits, bloom: system.bloom, system };
+        return result;
+      };
+      const smg = spray(['smg', 'shotgun', 'knife', 'pipe', 'axe']);
+      const rifle = spray(['rifle', 'shotgun', 'knife', 'pipe', 'axe']);
+      try {
+        // 14 rounds a second cannot land 14 times in 60 frames, but it must beat
+        // the rifle's 9.5/s comfortably and stay inside the rated rate.
+        assert(smg.shots > rifle.shots, `SMG (${smg.shots}) must out-fire the rifle (${rifle.shots})`);
+        assert(smg.shots >= 11 && smg.shots <= 14, `SMG fired ${smg.shots} rounds in a second`);
+        assertEqual(smg.ammo, 35 - smg.shots, 'every round comes out of the magazine');
+        assert(smg.hits.length > 0 && smg.hits.every((h) => h.damage === 15), 'SMG body shots are 15');
+        assert(smg.bloom > 0, 'the cone widens while the trigger is held');
+        assert(smg.bloom <= weapon.WEAPON_DEFS.smg.maxBloom, 'bloom is capped');
+      } finally {
+        smg.system.dispose();
+        rifle.system.dispose();
+      }
+    });
+  });
+
   /* ---------------- decals ---------------- */
   const effects = await import(pathToFileURL(path.join(JS_DIR, 'effects.js')).href);
   const { DecalPool, HOLE_LIFETIME, BLOOD_DECAL_LIFETIME, DECAL_FADE_TIME } = effects;
@@ -836,6 +1265,19 @@ async function main() {
     assertEqual(second.record.runs, 2, 'run count');
     const reloaded = storage.loadStorage();
     assertEqual(reloaded.highScore, 1200, 'persisted high score');
+  });
+
+  test('loadStorage returns a sanitized loadout and defaults when it is missing', () => {
+    memory.clear();
+    assertEqual(storage.loadStorage().loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'default when missing');
+    memory.set(storage.STORAGE_KEY, JSON.stringify({ loadout: ['shotgun', 'shotgun', 'axe', 'nope', 'nope'] }));
+    const loaded = storage.loadStorage();
+    assertEqual(loaded.loadout.length, weapon.SLOT_COUNT, 'five slots after a round trip');
+    assertEqual(new Set(loaded.loadout).size, weapon.SLOT_COUNT, 'no duplicates survive a round trip');
+    assertEqual(loaded.loadout[0], 'shotgun', 'a valid pick is kept');
+    memory.set(storage.STORAGE_KEY, JSON.stringify({ loadout: 'rifle' }));
+    assertEqual(storage.loadStorage().loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'garbage falls back');
+    memory.delete(storage.STORAGE_KEY);
   });
 
   test('storage failures do not throw', () => {

@@ -52,8 +52,7 @@ composition, shotgun falloff and LocalStorage handling.
 | R | Reload |
 | Shift | Sprint (forward only) |
 | Space | Jump; with a melee weapon drawn, swing instead (no jump) |
-| 1 / 2 | Switch to Assault Rifle / Shotgun |
-| 3 / 4 / 5 | Switch to Field Knife / Steel Pipe / Fire Axe |
+| 1–5 | Draw the weapon in that slot (firearms on 1–2, melee on 3–5; see LOADOUT in the menu) |
 
 Melee swings: hold A or D while attacking (or flick the mouse) for a backhand or
 forehand swing. Each swing has a wind-up, a strike and a recovery, and hits each enemy
@@ -67,6 +66,14 @@ Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
 - **Assault Rifle**: medium damage, fully automatic, 30-round magazine.
 - **Shotgun**: nine pellets, high damage at close range, falls off with distance,
   8-round magazine, slow fire, reloads one shell at a time (firing cancels a reload).
+- **S-9 Viper SMG**: 35-round magazine at 14 rounds a second, light damage per round,
+  heavy bloom while the trigger is held, fastest draw in the game; halved damage past
+  45 m. Shares rifle ammunition.
+- **MKR-1 Marksman**: 68 damage per semi-automatic round, x2.5 headshots, 12-round
+  magazine, no distance falloff, and the round penetrates one body for 60% damage.
+  Shares rifle ammunition and is the reason to keep a lane open.
+- **Loadout**: the LOADOUT screen in the main menu picks which weapon sits in each of
+  the five keys. It is saved with the settings.
 - **Field Knife**: quick, short-range single-target slash; no ammunition required.
 - **Steel Pipe**: wider, two-target sweep with moderate damage and reach.
 - **Fire Axe**: slow, heavy close-range strike with high damage.
@@ -113,3 +120,6 @@ project-last-stand/
 ## Debugging
 
 Add `?debug` to the URL to expose the running game as `window.lastStand` in the console.
+
+Add `?weapons=smg,dmr` to override the firearm slots for one session (nothing is saved),
+which is the quick way to test a new gun without touching the menu.
