@@ -569,7 +569,7 @@ export class Game {
     this.aiWorld.noise = { x: this.player.position.x, z: this.player.position.z, time: this.time };
   }
 
-  onEnemyHit({ enemy, damage, headshot, point }) {
+  onEnemyHit({ enemy, damage, headshot, point, stagger, knockback }) {
     if (!enemy.isTargetable()) return { killed: false };
     const result = enemy.takeDamage(damage, { headshot });
     if (result.killed) {
@@ -577,6 +577,11 @@ export class Game {
     } else {
       this.ui.hitMarker({ kill: false, headshot });
       if (enemy.type.armor && !headshot) this.audio.playHitMetal(point);
+      // Melee extras, reported by the weapon that landed the blow. A heavy blow
+      // flinches things a bullet cannot (the armour exception is Enemy's call)
+      // and shoves the body away along the swing.
+      if (stagger) enemy.applyStagger({ heavy: true, headshot });
+      if (knockback) enemy.applyKnockback(knockback.x, knockback.z, knockback.distance);
     }
     return { killed: result.killed };
   }
@@ -674,6 +679,10 @@ export class Game {
         this.audio.playWaveClear();
         this.level.pickups.setAllActive(true);
         this.ui.toast('Supply crates restocked', 'good');
+        // The MK2 SIDEARM is the "never empty" weapon: it tops itself back up to
+        // 36 rounds here, at the frame the intermission starts, instead of taking
+        // ammo crates (weapon.js ALWAYS_CARRIED / refillAlwaysCarried()).
+        if (this.weapons.refillAlwaysCarried()) this.ui.toast('SIDEARM RESTOCKED', 'good');
         break;
       case 'intermission':
         if (p.seconds <= 5) this.ui.setCountdown(String(p.seconds));
@@ -772,8 +781,9 @@ export class Game {
       }
     }
 
-    // Weapons: 1-2 remain firearms; 3-5 select the melee loadout.
-    for (let slot = 1; slot <= 5; slot++) {
+    // Weapons: 1-2 remain firearms, 3-5 the melee loadout, and the keys after
+    // them draw the always-carried sidearm (slotCount, not a hard-coded 5).
+    for (let slot = 1; slot <= this.weapons.slotCount; slot++) {
       if (input.wasPressed(`Digit${slot}`) || input.wasPressed(`Numpad${slot}`)) {
         this.weapons.requestSwitch(slot - 1);
       }

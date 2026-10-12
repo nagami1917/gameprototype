@@ -1,13 +1,14 @@
 # Weapons roadmap — more guns for PROJECT: LAST STAND
 
-Status: **milestones 0–3 landed** (schema + validation, loadouts, S-9 VIPER and
-MKR-1 MARKSMAN, `js/projectiles.js` + the GL-6 THUMPER). See "Implementation
-notes" at the bottom for the numbers that were actually shipped and where they
-deviate from this document. Milestones 4–6 (melee + pistol, ammo kinds, LMG +
-attachments) are still design. Covers new firearms, new melee, throwables and
-the systems they need. Today the game ships 8 weapons: MX-7 rifle, HB-12
-shotgun, S-9 SMG, MKR-1 marksman, GL-6 thumper, field knife, steel pipe, fire
-axe (`js/weapon.js` → `WEAPON_DEFS`).
+Status: **milestones 0–4 landed** (schema + validation, loadouts, S-9 VIPER and
+MKR-1 MARKSMAN, `js/projectiles.js` + the GL-6 THUMPER, CLEAVER/SLEDGEHAMMER +
+the never-empty MK2 SIDEARM). See "Implementation notes" at the bottom for the
+numbers that were actually shipped and where they deviate from this document.
+Milestones 5–6 (ammo kinds, LMG + attachments) are still design. Covers new
+firearms, new melee, throwables and the systems they need. Today the game ships
+11 weapons: MX-7 rifle, HB-12 shotgun, S-9 SMG, MKR-1 marksman, GL-6 thumper,
+MK2 sidearm, field knife, steel pipe, fire axe, cleaver machete, sledgehammer
+(`js/weapon.js` → `WEAPON_DEFS`).
 
 ---
 
@@ -54,6 +55,9 @@ Notes:
 - **Pistol reserve** = "always available": it refills to 36 rounds at the start
   of every intermission instead of using pickups, so a dry player is never
   weaponless. Cheap to implement (`needsAmmo()` already skips melee).
+  **Shipped in milestone 4**: the sidearm is not a loadout pick at all — it is
+  always carried on its own key (6) and is the one firearm exempt from
+  `AMMO_PICKUP`. See §7 for the exact rule.
 - **DMR penetration**: `traceRay()` returns on the first valid hitbox — add
   `penetration: 1` to keep raycasting past a killed/penetrated target, applying
   `damage * 0.6` to each subsequent body. This also makes the LMG feel heavy.
@@ -67,7 +71,9 @@ Notes:
 | `sledge` | SLEDGEHAMMER | 140 | 2.1 | 24° | 1 | very slow (1.3 s cycle) | Guaranteed stagger on anything but armored heads; knockback |
 
 Both reuse `swingTimeline()` with new `swing` poses (`'sweep'`, `'smash'`) in
-`meleeAnim.js` — no new animation system required.
+`meleeAnim.js` — no new animation system required. **Shipped in milestone 4; the
+extra fields these two needed (`heavyStagger`, `knockback`) and the stagger
+exception against armour are recorded in §7.**
 
 ### 2.3 Throwables / tactical slot (stretch)
 
@@ -175,7 +181,7 @@ Pure functions + tests, so balance changes cannot silently break the suite:
 | 1 | Two hitscan guns | SMG + DMR, new viewmodels, shot profiles | Both are pick-up-able and feel distinct; reload/HUD/decal behaviour identical to existing guns |
 | 2 | Loadouts + slot rebind | Loadout screen, storage, dynamic HUD slots | Pick 2 of 4 firearms; HUD lists what you carry; keys 1–5 still work |
 | 3 | Projectiles | `js/projectiles.js`, GL-6, scorch decals, AoE damage with LOS | Grenade launcher clears a clump; no self-damage through walls; pooled (no per-frame allocation) |
-| 4 | Melee + pistol | Machete, sledge, always-available pistol | New swing poses; stagger works; pistol refills each intermission |
+| 4 | Melee + pistol (**landed**) | Machete, sledge, always-available pistol | New swing poses; stagger works; pistol refills each intermission |
 | 5 | Ammo kinds + pickups | Kind-aware `PickupSystem`, HUD | Ammo boxes state their kind; LMG ammo is rarer than rifle ammo |
 | 6 | LMG + attachments (stretch) | BZ-40, upgrade bench, attachments on `WeaponState` | Bench usable in intermission; attachments persist for the run |
 
@@ -294,3 +300,88 @@ Milestone 3 — `js/projectiles.js` and the GL-6 THUMPER. The shipped numbers
 - `headshotMultiplier: 1.15` is a **nominal** value: the schema requires > 1 for
   every firearm, and an explosion has no aiming point — splash resolution always
   reports `headshot: false`.
+
+Milestone 4 — the CLEAVER MACHETE, the SLEDGEHAMMER and the MK2 SIDEARM (deviations
+from §2.1/§2.2 in brackets):
+
+| id | Damage | Rate / cycle | Reach / arc | Targets | Range | Notes |
+| --- | --- | --- | --- | --- | --- | --- |
+| `pistol` | 30 (head ×2) | 5/s semi, 1.3 s reload | - | 1 | 60 m, falloff 18→40 at min 0.6 | slot 2 nominal; always carried as **key 6**, reserve 36/36 |
+| `machete` | 58 | 0.36 s swing, 0.5 s cycle | 1.85 m / 55° | 3 | - | swing `sweep`, 7 rays |
+| `sledge` | 140 | 1.12 s swing, 1.3 s cycle | 2.1 m / 24° | 1 | - | swing `smash`, `heavyStagger`, `knockback` 1.2 m |
+
+- **Two new swing poses, no new animation system.** `STYLE_POSES` in
+  `js/meleeAnim.js` gained `sweep` (a level horizontal cut that crosses the body:
+  the arm barely bends, which is what reads as a sweep) and `smash` (up behind
+  the shoulder, then straight down with a follow-through below the impact). Both
+  reuse `swingTimeline()`/`swingPoseAt()`/`REST_POSE`, start and end at rest, move
+  no more than 0.25 rad per 240 Hz step, and mirror for backhands like the old
+  ones. The table is now exported so the suite can prove every melee def names a
+  style that exists (a typo used to fall back to `slash` in silence).
+- **Machete is the fast sweep, sledge is the commitment** (the roles the document
+  asked for, checked in the suite): the machete cuts wider than the pipe
+  (55° / 3 targets vs 42° / 2) and cycles faster (0.5 s vs 0.72 s) at a slightly
+  shorter reach (1.85 m vs 1.9 m); the sledge hits
+  for 140 on one body, reaches 2.1 m, telegraphs for the longest wind-up of any
+  melee weapon (0.3 s) and costs 1.3 s between blows.
+- **"Guaranteed stagger on anything but armored heads" — the call that was made.**
+  A `heavy` blow (melee defs can set `heavyStagger: true`) overrules
+  `ENEMY_TYPES.armored.staggerable: false`: it flinches every type, with one
+  exception — a **body** hit on an armoured enemy does not stagger it, because the
+  plates take the hammer. A **head** hit does, the same way headshots already
+  ignore armour for damage. So brute force never beats the brute and aim still
+  does, which is the only reading that keeps the armoured type's super-armour
+  identity intact. The flinch is `HEAVY_STAGGER_TIME = 0.45 s` (a bullet's is
+  0.2 s), so a sledge connection buys three times the breathing room.
+- **Knockback is new** (`Enemy` had no impulse): `applyKnockback(x, z, distance)`
+  turns an impulse into `distance × KNOCKBACK_SPEED (6)` metres per second that
+  decays at `KNOCKBACK_DECAY (9)`/s and is zeroed below 0.05 m/s, so a 1.2 m
+  impulse carries the body ~0.8 m over ~0.35 s. `EnemyAI.update()` integrates it
+  as step 0 (before the state machine, so a blow still slides a body that is
+  mid-swing) through `moveCylinder()`, keeping the "walls are solid" contract:
+  bodies can be slammed into walls, never through them. Only the sledge carries
+  `knockback`, so no existing melee swing changed.
+- **The pistol is a loadout *non*-option.** `ALWAYS_CARRIED = ['pistol']`:
+  `sanitizeLoadout()` refuses an always-carried id for a loadout slot (it falls
+  back rather than carrying two of it), `loadoutSlotOptions()` does not offer it
+  (there is nothing to choose: it is in the kit either way), and `WeaponSystem`
+  appends it *after* the loadout keys, so it owns **key 6** (`slotCount` is 6, the
+  digit loop in `game.js` walks `weapons.slotCount` instead of a hard-coded 5, and
+  `hudSlotLabels()` prints `6 SIDEARM`). A kit swap therefore can never cost the
+  player the sidearm.
+- **"Never empty" rule**: the sidearm is the one firearm **exempt from
+  `AMMO_PICKUP` by name** — `needsAmmo()` ignores it (a dry pistol must not make a
+  crate look collectable while the crate refills nothing) and `addAmmo()` skips
+  it. Instead `WeaponSystem.refillAlwaysCarried()` tops every always-carried
+  weapon back to its `startReserve` (36 rounds) and `Game.onWaveEvent('waveCleared')`
+  calls it — that event *is* the start of the intermission — with a
+  `SIDEARM RESTOCKED` toast only when rounds actually came back. `maxReserve` is
+  36 as well, so 12 + 36 rounds per wave is a real budget: the sidearm is a
+  backup, not a primary.
+- **"Weak vs armour" is a description, not a hidden mechanic**: no new field, no
+  armour bypass. A body shot is `round(30 × 0.65) = 20` against the 210 hp
+  armoured infected, so half a magazine does not clear one (pinned in the suite);
+  headshots still bypass armour exactly as they do for every other gun. Sustained
+  DPS is ~97 (inside the 60–160 band), and `switchTime: 0.25` is the fastest draw
+  in the game — the SMG's 0.3 s is now second.
+- **Viewmodels**: `buildMacheteModel()` / `buildSledgeModel()` follow the hand-built
+  melee pattern (`grip` point for the socket, `trail {base, tip}` for the blade
+  ribbon); the pistol is a `buildParametricFirearm()` spec like the SMG/DMR/GL-6.
+  `WeaponSystem` now parents **every** viewmodel once in its constructor
+  (`placeModel()`), not only the carried ones: `prewarmShaders()` compiles
+  whatever is in the scene graph, so a melee weapon that no loadout picked used to
+  compile its shader the first time it was drawn. Hidden, not detached.
+- **Audio**: `SHOT_PROFILES.pistol` (short bright crack: bandpass 2600 + highpass
+  5200, triangle 210→90) and two rows in `playMeleeSwing()` — `machete` (wide
+  whoosh + metal edge) and `sledge` (low rush + a weight landing). The knife/pipe
+  fallback branches are untouched.
+- **Schema**: melee defs may now carry `heavyStagger` (boolean) and `knockback`
+  (number ≥ 0); both are melee-only (`CATEGORY_ONLY_FIELDS`) and validated when
+  present. Nothing else about the schema changed, and `ammoKind: 'rifle'` on the
+  pistol is only there because the schema requires one — the pickup system still
+  ignores the sidearm entirely.
+- **Not landed yet**: milestone 5's kind-aware pickups. `addAmmo()` is still
+  "refill every carried firearm by its own `AMMO_PICKUP` amount", which is why the
+  pistol needed the by-name pickup exemption above. When milestone 5 lands, the
+  exemption stays: the sidearm should refill from no crate, whatever the crates
+  carry.

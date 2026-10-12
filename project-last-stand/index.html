@@ -108,11 +108,11 @@
     </div>
   </section>
 
-  <!-- Loadout (main menu): which weapon each key 1-5 draws -->
+  <!-- Loadout (main menu): which weapon each key 1-5 draws; key 6 is always the sidearm -->
   <section class="screen hidden" id="screen-loadout" data-screen="loadout" aria-label="Loadout">
     <div class="panel sub-panel">
       <h2 class="screen-title">LOADOUT</h2>
-      <p class="pause-note">Keys 1–5 draw the weapon in that slot. Firearms fill slots 1–2, melee weapons slots 3–5.</p>
+      <p class="pause-note">Keys 1–5 draw the weapon in that slot: firearms fill slots 1–2, melee weapons slots 3–5. Key 6 is always the MK2 SIDEARM — it cannot be dropped and refills itself at every intermission.</p>
       <!-- Filled by ui.writeLoadoutControls() from the WEAPON_DEFS table. -->
       <div class="settings-grid" id="loadout-grid"></div>
       <p class="setting-note">The loadout is saved automatically in this browser.</p>
@@ -175,9 +175,10 @@
           <tr><th>Right click</th><td>Aim down sights (firearms only)</td></tr>
           <tr><th>R</th><td>Reload firearms</td></tr>
           <tr><th>Shift</th><td>Sprint forward (uses stamina)</td></tr>
-          <tr><th>Space</th><td>Jump (firearms); swing the melee weapon (knife, pipe, axe)</td></tr>
+          <tr><th>Space</th><td>Jump (firearms); swing the melee weapon (knife, pipe, axe, machete, sledgehammer)</td></tr>
           <tr><th>Shift + A/S/D, then Space</th><td>Dash left / backward / right (uses stamina)</td></tr>
           <tr><th>1–5</th><td>Switch weapon: whatever the LOADOUT screen put in that slot</td></tr>
+          <tr><th>6</th><td>Draw the MK2 SIDEARM — always carried, refilled at every intermission</td></tr>
           <tr><th>Esc</th><td>Pause / release mouse</td></tr>
         </tbody>
       </table>

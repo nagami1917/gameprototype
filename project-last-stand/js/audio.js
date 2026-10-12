@@ -53,6 +53,15 @@ export const SHOT_PROFILES = {
     ],
     body: { volume: 0.45, type: 'sine', f0: 120, f1: 36, decay: 0.26 },
   },
+  // MK2 SIDEARM: the shortest, brightest crack in the game - a pistol should
+  // never sound like a rifle, or the "backup" reads as a downgrade.
+  pistol: {
+    noise: [
+      { volume: 0.4, filter: 'bandpass', freq: 2600, q: 1.0, decay: 0.05 },
+      { volume: 0.18, filter: 'highpass', freq: 5200, q: 0.5, decay: 0.009 },
+    ],
+    body: { volume: 0.2, type: 'triangle', f0: 210, f1: 90, decay: 0.055 },
+  },
   // GL-6 THUMPER: a hollow chunk (the round leaving the tube), not a crack. The
   // bang itself is a separate sound, played where the round goes off.
   launcher: {
@@ -295,6 +304,18 @@ export class AudioManager {
     if (kind === 'axe') {
       this.burst({ volume: 0.38, filter: 'lowpass', freq: 850, q: 0.8, decay: 0.24, sweepTo: 180 });
       this.blip({ volume: 0.16, type: 'triangle', f0: 170, f1: 70, decay: 0.2 });
+      return;
+    }
+    if (kind === 'machete') {
+      // A long blade through air: a wide, fast whoosh with a metallic edge.
+      this.burst({ volume: 0.26, filter: 'bandpass', freq: 2400, q: 0.7, decay: 0.16, sweepTo: 1100 });
+      this.burst({ volume: 0.12, filter: 'highpass', freq: 5200, q: 0.6, decay: 0.05 });
+      return;
+    }
+    if (kind === 'sledge') {
+      // Mass and air: a low rush on the way down, then the weight landing.
+      this.burst({ volume: 0.4, filter: 'lowpass', freq: 620, q: 0.9, decay: 0.3, sweepTo: 160 });
+      this.blip({ volume: 0.22, type: 'sine', f0: 120, f1: 44, decay: 0.32 });
       return;
     }
     this.burst({ volume: 0.3, filter: 'bandpass', freq: 1500, q: 0.8, decay: 0.18, sweepTo: 450 });

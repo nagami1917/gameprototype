@@ -193,6 +193,37 @@ export const WEAPON_DEFS = {
     tracer: false,           // the round itself is visible: no tracer line
     sound: 'launcher',
   },
+  pistol: {
+    id: 'pistol',
+    category: 'firearm',
+    name: 'MK2 SIDEARM',
+    shortName: 'SIDEARM',
+    slot: 2,                 // the slot it *would* take; it is always carried, see ALWAYS_CARRIED
+    ammoKind: 'rifle',       // 9 mm shares the rifle crates - the sidearm never eats one (ALWAYS_CARRIED)
+    unlockWave: 1,           // everybody starts with a sidearm
+    moveSpeedMult: 1,
+    adsZoom: 1.2,
+    damage: 30,
+    headshotMultiplier: 2,   // headshots still ignore armour: the brute's answer is aim
+    fireRate: 5,             // semi-auto, one click one round
+    auto: false,
+    magazineSize: 12,
+    startReserve: 36,        // refilled to this at every intermission: the "never empty" rule
+    maxReserve: 36,          // capped pool: the sidearm is a backup, not a primary
+    reloadTime: 1.3,         // fastest reload in the game
+    reloadMode: 'magazine',
+    switchTime: 0.25,        // fastest draw, faster than the SMG
+    pellets: 1,
+    spread: 0.009,
+    bloomPerShot: 0.004,
+    maxBloom: 0.028,
+    bloomDecay: 6,
+    range: 60,
+    falloff: { start: 18, end: 40, min: 0.6 }, // a pistol round loses steam in a long corridor
+    recoil: { pitch: 0.018, yaw: 0.005, kick: 0.045, trauma: 0.14 },
+    tracer: true,
+    sound: 'pistol',
+  },
   knife: {
     id: 'knife',
     category: 'melee',
@@ -264,6 +295,58 @@ export const WEAPON_DEFS = {
     activeTime: 0.2,
     trailColor: 0xffa860,
   },
+  machete: {
+    id: 'machete',
+    category: 'melee',
+    name: 'CLEAVER MACHETE',
+    shortName: 'MACHETE',
+    slot: 3,                 // the hit-and-run alternative to the pipe
+    unlockWave: 2,
+    moveSpeedMult: 1,
+    damage: 58,
+    reach: 1.85,
+    arcDegrees: 55,          // by far the widest fan: the sweep catches a clump
+    rayCount: 7,
+    maxTargets: 3,           // three bodies per swing, one swing every half second
+    hitTime: 0.12,
+    attackDuration: 0.36,
+    attackCooldown: 0.5,     // ~0.5 s cycle, the fastest melee in the game
+    switchTime: 0.34,
+    swing: 'sweep',
+    windup: 0.08,
+    strikeEnd: 0.24,
+    activeTime: 0.1,
+    trailColor: 0xe4f1ff,
+  },
+  sledge: {
+    id: 'sledge',
+    category: 'melee',
+    name: 'SLEDGEHAMMER',
+    shortName: 'SLEDGE',
+    slot: 5,                 // competes with the fire axe for the heavy melee key
+    unlockWave: 4,
+    moveSpeedMult: 1,
+    damage: 140,             // one blow drops an infected and staggers everything else
+    reach: 2.1,
+    arcDegrees: 24,          // narrow: this is a placement weapon, not a crowd clearer
+    rayCount: 3,
+    maxTargets: 1,
+    hitTime: 0.42,
+    attackDuration: 1.12,
+    attackCooldown: 1.3,     // ~1.3 s cycle: miss and you are open for a long time
+    switchTime: 0.6,
+    swing: 'smash',
+    windup: 0.3,
+    strikeEnd: 0.68,
+    activeTime: 0.22,
+    // Melee-only extras (see resolveMeleeAttack/Enemy.applyStagger): a hammer blow
+    // puts a body off balance even when it is too tough to flinch from a bullet,
+    // and shoves it off its feet. Both are inert on the other melee weapons, so
+    // their swings are untouched.
+    heavyStagger: true,
+    knockback: 1.2,
+    trailColor: 0xffc46b,
+  },
 };
 
 /** Slot order is stable: rifle and shotgun keep their existing keys. */
@@ -280,6 +363,19 @@ export const SLOT_CATEGORIES = Object.freeze(['firearm', 'firearm', 'melee', 'me
 
 export const DEFAULT_LOADOUT = Object.freeze([...WEAPON_ORDER]);
 
+/**
+ * Weapons that are always in the kit, in their own keys *after* the loadout
+ * slots - they are never a loadout choice, so `sanitizeLoadout()` refuses them
+ * and `loadoutSlotOptions()` does not offer them.
+ *
+ * The MK2 SIDEARM is the "never empty" weapon (docs/Weapons_Roadmap.md §2.1):
+ * being always carried is what lets a player with an empty rifle still fight.
+ * It also pays for that privilege by never taking pickups - it refills itself
+ * to `startReserve` at the start of every intermission instead
+ * (`WeaponSystem.refillAlwaysCarried()`), so `AMMO_PICKUP` has no row for it.
+ */
+export const ALWAYS_CARRIED = Object.freeze(['pistol']);
+
 /** Firearms only; melee weapons never consume or receive ammunition. */
 export const AMMO_PICKUP = {
   rifle: 45,
@@ -293,18 +389,21 @@ export const AMMO_PICKUP = {
 export const WEAPON_IDS = Object.freeze(Object.keys(WEAPON_DEFS));
 
 /**
- * True for a weapon id that exists and belongs in `category` (used to keep a
- * firearm out of a melee slot and the other way round).
+ * True for a weapon id that exists, belongs in `category`, and may actually be
+ * picked for a loadout slot. The always-carried sidearm fails the last test: it
+ * already has a key of its own, so a loadout asking for it falls back to the
+ * rest of the kit instead of carrying two of them.
  */
 function fitsSlot(id, category) {
   const def = WEAPON_DEFS[id];
-  return !!def && (category ? def.category === category : true);
+  if (!def || ALWAYS_CARRIED.includes(id)) return false;
+  return category ? def.category === category : true;
 }
 
 /**
- * Coerces anything into a usable 5-slot loadout: unknown ids, duplicates,
- * weapons in the wrong category and missing entries all fall back to `base`
- * (or to the first legal weapon for that slot).
+ * Coerces anything into a usable loadout: unknown ids, duplicates, weapons in
+ * the wrong category, always-carried weapons and missing entries all fall back
+ * to `base` (or to the first legal weapon for that slot).
  *
  * @param {unknown} input    array of weapon ids, possibly short or bogus
  * @param {string[]} [base]  loadout to fall back to, defaults to the standard one
@@ -327,22 +426,32 @@ export function sanitizeLoadout(input, base = DEFAULT_LOADOUT) {
   return out;
 }
 
-/** HUD labels for a loadout: `['1 RIFLE', '2 SHOTGUN', ...]`, key = index + 1. */
+/** Every key that actually draws a weapon: the loadout, then the always-carried ones. */
+export function slotIds(loadout = DEFAULT_LOADOUT) {
+  return [...loadout, ...ALWAYS_CARRIED];
+}
+
+/**
+ * HUD labels for a loadout: `['1 RIFLE', '2 SHOTGUN', ..., '6 SIDEARM']`,
+ * key = index + 1. The always-carried weapons get the keys after the loadout's.
+ */
 export function hudSlotLabels(loadout = DEFAULT_LOADOUT) {
-  return loadout.map((id, i) => `${i + 1} ${WEAPON_DEFS[id]?.shortName ?? WEAPON_DEFS[id]?.name ?? id}`);
+  return slotIds(loadout)
+    .map((id, i) => `${i + 1} ${WEAPON_DEFS[id]?.shortName ?? WEAPON_DEFS[id]?.name ?? id}`);
 }
 
 /**
  * What the loadout screen may offer per slot: one entry per key, with the legal
  * weapons for that category. Built from WEAPON_DEFS so a new gun only needs a
- * def to appear in the menu.
+ * def to appear in the menu - the always-carried sidearm is the one exception,
+ * because there is nothing to choose: it is in the kit either way.
  */
 export function loadoutSlotOptions() {
   return SLOT_CATEGORIES.map((category, index) => ({
     index,
     category,
     name: `SLOT ${index + 1} - ${category === 'firearm' ? 'FIREARM' : 'MELEE'}`,
-    options: WEAPON_IDS.filter((id) => WEAPON_DEFS[id].category === category)
+    options: WEAPON_IDS.filter((id) => fitsSlot(id, category))
       .map((id) => ({ id, name: WEAPON_DEFS[id].name, unlockWave: WEAPON_DEFS[id].unlockWave })),
   }));
 }
@@ -376,7 +485,7 @@ const CATEGORY_ONLY_FIELDS = {
     'auto', 'pellets', 'spread', 'bloomPerShot', 'maxBloom', 'bloomDecay', 'recoil', 'falloff',
     'headshotMultiplier', 'penetration', 'adsZoom', 'tracer', 'sound', 'projectile', 'splash'],
   melee: ['reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
-    'swing', 'windup', 'strikeEnd', 'activeTime', 'trailColor'],
+    'swing', 'windup', 'strikeEnd', 'activeTime', 'trailColor', 'heavyStagger', 'knockback'],
 };
 
 export const AMMO_KINDS = Object.freeze(['rifle', 'shell', 'heavy', 'explosive']);
@@ -468,6 +577,12 @@ export function validateWeaponDef(def, allDefs = WEAPON_DEFS, loadout = DEFAULT_
     if (!(def.attackCooldown >= def.attackDuration)) fail('attackCooldown must outlast attackDuration');
     if (!(def.reach > 0 && def.arcDegrees > 0)) fail('reach and arcDegrees must be greater than 0');
     if (!(def.rayCount >= 1 && def.maxTargets >= 1)) fail('rayCount and maxTargets must be at least 1');
+    // Optional melee extras: only the sledgehammer carries them today, so they
+    // are validated when present rather than required.
+    if (def.heavyStagger !== undefined && typeof def.heavyStagger !== 'boolean') {
+      fail('heavyStagger must be a boolean when present');
+    }
+    if (def.knockback !== undefined && !(def.knockback >= 0)) fail('knockback must be zero or more');
   }
 
   // A def may not mix firearm and melee fields: that is how "melee has no ammo"
@@ -714,6 +829,85 @@ function buildAxeModel() {
   };
 }
 
+function buildMacheteModel() {
+  const group = new THREE.Group();
+  const steel = mat(0xb6c2cb, { roughness: 0.3, metalness: 0.8 });
+  const edge = mat(0xe8f2fa, { roughness: 0.18, metalness: 0.9 });
+  const grip = mat(0x2b2f24, { roughness: 0.9, metalness: 0.03 });
+  const tape = mat(0x6f7a4a, { roughness: 0.85, metalness: 0.0 });
+
+  const handle = box(0.048, 0.058, 0.17, grip);
+  handle.position.set(0, 0, 0.135);
+  group.add(handle);
+  const band = box(0.056, 0.064, 0.028, tape);
+  band.position.set(0, 0, 0.1);
+  group.add(band);
+  const guard = box(0.1, 0.024, 0.035, steel);
+  guard.position.set(0, 0.012, 0.02);
+  group.add(guard);
+  // A long straight blade with a clipped tip: a machete, not a knife.
+  const blade = box(0.052, 0.02, 0.4, steel);
+  blade.position.set(0, 0.03, -0.18);
+  group.add(blade);
+  const cuttingEdge = box(0.012, 0.014, 0.4, edge);
+  cuttingEdge.position.set(-0.024, 0.024, -0.18);
+  group.add(cuttingEdge);
+  const tip = box(0.05, 0.018, 0.1, steel);
+  tip.position.set(0, 0.048, -0.4);
+  tip.rotation.x = -0.26; // the point rides up, like a real cleaver tip
+  group.add(tip);
+
+  mergeMeshesByMaterial(group);
+  return {
+    group,
+    grip: new THREE.Vector3(0, 0, 0.135),
+    trail: { base: new THREE.Vector3(0, 0.03, 0.0), tip: new THREE.Vector3(0, 0.03, -0.45) },
+  };
+}
+
+function buildSledgeModel() {
+  const group = new THREE.Group();
+  const shaftMat = mat(0x5b4227, { roughness: 0.85, metalness: 0.03 });
+  const headMat = mat(0x6f7780, { roughness: 0.42, metalness: 0.75 });
+  const faceMat = mat(0x3a4046, { roughness: 0.5, metalness: 0.8 });
+  const gripMat = mat(0x1d2124, { roughness: 0.92, metalness: 0.02 });
+  const accent = mat(0xd08a1e, { roughness: 0.45, metalness: 0.25 });
+
+  const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.026, 0.032, 0.68, 10), shaftMat);
+  shaft.rotation.x = Math.PI / 2;
+  shaft.position.set(0, 0, 0.0);
+  group.add(shaft);
+  const head = new THREE.Mesh(new THREE.CylinderGeometry(0.058, 0.058, 0.28, 12), headMat);
+  head.rotation.z = Math.PI / 2; // head axis across the swing
+  head.position.set(0, 0.005, -0.32);
+  group.add(head);
+  for (const dx of [-0.148, 0.148]) {
+    const face = new THREE.Mesh(new THREE.CylinderGeometry(0.062, 0.062, 0.022, 12), faceMat);
+    face.rotation.z = Math.PI / 2;
+    face.position.set(dx, 0.005, -0.32);
+    group.add(face);
+  }
+  const collar = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.05, 10), faceMat);
+  collar.rotation.x = Math.PI / 2;
+  collar.position.set(0, 0, -0.245);
+  group.add(collar);
+  const grip = box(0.056, 0.062, 0.24, gripMat);
+  grip.position.set(0, 0, 0.24);
+  group.add(grip);
+  const band = box(0.07, 0.072, 0.03, accent);
+  band.position.set(0, 0, 0.3);
+  group.add(band);
+
+  mergeMeshesByMaterial(group);
+  return {
+    group,
+    grip: new THREE.Vector3(0, 0, 0.3),
+    // The ribbon sweeps the hammer head, so its "base" and "tip" are the two
+    // faces of the head rather than a blade edge.
+    trail: { base: new THREE.Vector3(0.13, 0.005, -0.32), tip: new THREE.Vector3(-0.13, 0.005, -0.32) },
+  };
+}
+
 /**
  * Parametric firearm viewmodel.
  *
@@ -839,6 +1033,26 @@ function buildLauncherModel() {
   });
 }
 
+/** MK2 SIDEARM: compact slide, stubby barrel, angled grip and a small magazine. */
+function buildPistolModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x2b3138, frame: 0x15181b, accent: 0xc0462a },
+    receiver: { w: 0.046, h: 0.078, d: 0.21, z: -0.02 },
+    barrels: [
+      { r0: 0.013, r1: 0.012, len: 0.1, y: 0.008, z: -0.16 }, // barrel past the slide
+      { r0: 0.017, r1: 0.017, len: 0.03, y: 0.008, z: -0.21 }, // muzzle crown
+    ],
+    boxes: [
+      { w: 0.042, h: 0.13, d: 0.075, y: -0.1, z: 0.055, rx: -0.28 },        // grip
+      { w: 0.034, h: 0.1, d: 0.05, y: -0.115, z: 0.065, rx: -0.28 },        // magazine base
+      { w: 0.014, h: 0.022, d: 0.014, y: 0.05, z: -0.1 },                   // front sight
+      { w: 0.032, h: 0.02, d: 0.022, y: 0.048, z: 0.06 },                   // rear sight
+      { w: 0.05, h: 0.014, d: 0.055, y: -0.042, z: -0.05, color: 'accent' }, // slide accent
+    ],
+    muzzle: { x: 0, y: 0.008, z: -0.24 },
+  });
+}
+
 /** Damage each body behind the first takes, compounding: 60%, then 36%. */
 export const PENETRATION_DAMAGE_MULT = 0.6;
 
@@ -867,9 +1081,12 @@ const VIEWMODEL_BUILDERS = {
   smg: buildSmgModel,
   dmr: buildDmrModel,
   launcher: buildLauncherModel,
+  pistol: buildPistolModel,
   knife: buildKnifeModel,
   pipe: buildPipeModel,
   axe: buildAxeModel,
+  machete: buildMacheteModel,
+  sledge: buildSledgeModel,
 };
 
 export class WeaponSystem {
@@ -879,7 +1096,8 @@ export class WeaponSystem {
    * @param {import('./audio.js').AudioManager} opts.audio
    * @param {import('./effects.js').EffectsManager} opts.effects
    * @param {import('./player.js').Player} opts.player
-   * @param {string[]} [opts.loadout]  weapon id per key (1-5); sanitized, defaults to WEAPON_ORDER
+   * @param {string[]} [opts.loadout]  weapon id per key (1-5); sanitized, defaults to WEAPON_ORDER.
+   *                                   The always-carried sidearm is added after them (key 6).
    * @param {object} opts.hooks  onShot(def), onEnemyHit({enemy,damage,headshot,point,distance,weapon}) -> {killed},
    *                             onSwitch(def), onReload(def), onMessage(text)
    */
@@ -925,6 +1143,15 @@ export class WeaponSystem {
       m.muzzle.add(m.flash);
     }
 
+    // Attach every viewmodel once, up front - including the ones no loadout is
+    // carrying. Game.prewarmShaders() reveals and compiles all of them at
+    // startup, and three only compiles objects that are in the scene graph, so a
+    // gun that is never attached would compile its shader the first time it is
+    // drawn. Hidden, not detached, is the contract (see bindModels()).
+    for (const [id, m] of this.viewmodels) {
+      if (m) this.placeModel(WEAPON_DEFS[id], m);
+    }
+
     this.loadout = [];
     this.states = [];
     this.models = [];
@@ -966,14 +1193,34 @@ export class WeaponSystem {
     return this.states[this.index].def;
   }
 
+  /** How many keys draw a weapon: the loadout slots plus the always-carried ones. */
+  get slotCount() {
+    return this.states.length;
+  }
+
+  /**
+   * The id behind each key, in order: `loadout` for keys 1..5, then whatever is
+   * always carried. Viewmodels are keyed off this, not off `loadout` alone, or
+   * the sidearm would be hidden by the "weapon left the kit" sweep in bindModels().
+   */
+  get slotIds() {
+    return this._slotIds;
+  }
+
   /**
    * Rebuilds the slots for a new loadout. Only safe between runs (menu/pause):
    * ammo and the drawn weapon are reset, which a mid-fight swap must not do.
+   *
+   * The always-carried weapons are appended after the loadout keys, so a new kit
+   * never costs the player the sidearm. `sanitizeLoadout()` refuses to put an
+   * always-carried id in a loadout slot, so no weapon can end up with two slots.
+   *
    * @param {string[]} loadout  weapon id per key, sanitized against the current loadout
    */
   setLoadout(loadout) {
     this.loadout = sanitizeLoadout(loadout, this.loadout);
-    this.states = this.loadout.map((id) => new WeaponState(WEAPON_DEFS[id]));
+    this._slotIds = slotIds(this.loadout);
+    this.states = this._slotIds.map((id) => new WeaponState(WEAPON_DEFS[id]));
     this.index = 0;
     this.switchTimer = 0;
     this.bloom = 0;
@@ -998,9 +1245,9 @@ export class WeaponSystem {
    * mid-run.
    */
   bindModels() {
-    this.models = this.loadout.map((id) => this.viewmodels.get(id));
+    this.models = this.slotIds.map((id) => this.viewmodels.get(id));
     for (const [id, model] of this.viewmodels) {
-      if (!model || this.loadout.includes(id)) continue;
+      if (!model || this.slotIds.includes(id)) continue;
       model.group.visible = false;
     }
     this.models.forEach((_, i) => this.attachModel(i));
@@ -1032,10 +1279,9 @@ export class WeaponSystem {
   /**
    * Parents a viewmodel to the right place: melee weapons go to the hand socket
    * of the arm rig (so they cannot detach from the hand), firearms to the camera.
+   * Used at construction for every viewmodel and again on every switch.
    */
-  attachModel(index) {
-    const m = this.models[index];
-    const def = this.states[index].def;
+  placeModel(def, m) {
     if (def.category === 'melee') {
       this.melee.socket.add(m.group);
       m.group.position.copy(m.grip).negate(); // the grip point sits on the hand socket
@@ -1044,6 +1290,11 @@ export class WeaponSystem {
       this.camera.add(m.group);
       m.group.position.set(0.24, -0.24, -0.42);
     }
+  }
+
+  /** Parents the viewmodel of the current slot (see placeModel). */
+  attachModel(index) {
+    this.placeModel(this.states[index].def, this.models[index]);
   }
 
   /** Shows the current weapon (and the arm, for melee) only while the viewmodel is visible. */
@@ -1114,10 +1365,17 @@ export class WeaponSystem {
     }
   }
 
-  /** True when a firearm has room for reserve ammo. Melee is inexhaustible. */
+  /**
+   * True when a *pickup-fed* firearm has room for reserve ammo. Melee is
+   * inexhaustible, and the always-carried sidearm is ignored: it refills itself
+   * at every intermission (refillAlwaysCarried()), so a dry pistol must not make
+   * an ammo crate look collectable while the crate refills nothing.
+   */
   needsAmmo() {
     return this.states.some((st) =>
-      st.def.category === 'firearm' && st.reserve < st.def.maxReserve);
+      st.def.category === 'firearm' &&
+      !ALWAYS_CARRIED.includes(st.def.id) &&
+      st.reserve < st.def.maxReserve);
   }
 
   /** Shows or hides the viewmodel (hidden in menus and after death). */
@@ -1158,6 +1416,8 @@ export class WeaponSystem {
     let added = false;
     for (const st of this.states) {
       if (st.def.category !== 'firearm') continue;
+      // The sidearm is fed by the intermission refill, never by a crate.
+      if (ALWAYS_CARRIED.includes(st.def.id)) continue;
       // A weapon without a pickup value simply keeps its reserve (every firearm
       // has one today - the schema test enforces it).
       const amount = AMMO_PICKUP[st.def.id];
@@ -1167,6 +1427,28 @@ export class WeaponSystem {
       if (st.reserve > before) added = true;
     }
     return added;
+  }
+
+  /**
+   * Tops every always-carried weapon back up to its `startReserve` - the MK2
+   * SIDEARM rule: it never uses pickups, it refills to 36 rounds at the start of
+   * every intermission, so a player who emptied everything else is never disarmed.
+   * Called by Game.onWaveEvent('waveCleared'), which is the frame the intermission
+   * begins.
+   *
+   * @returns {boolean} true when at least one slot actually gained rounds
+   */
+  refillAlwaysCarried() {
+    let refilled = false;
+    for (const st of this.states) {
+      if (!ALWAYS_CARRIED.includes(st.def.id)) continue;
+      // Nothing is ever taken away: a weapon already above its start reserve
+      // (an attachment or a mode could raise maxReserve) keeps what it has.
+      const before = st.reserve;
+      st.reserve = Math.min(st.def.maxReserve, Math.max(st.reserve, st.def.startReserve));
+      if (st.reserve > before) refilled = true;
+    }
+    return refilled;
   }
 
   /**
@@ -1347,6 +1629,14 @@ export class WeaponSystem {
           point,
           distance: hit.distance,
           weapon: def.id,
+          // Melee extras. A heavy blow flinches even super-armour (the exception
+          // lives in Enemy.applyStagger) and shoves the body along the blow
+          // direction. The knockback is a fresh object, not the `_dir` scratch:
+          // a hook is allowed to keep the hit it was handed.
+          stagger: def.heavyStagger ? 'heavy' : undefined,
+          knockback: def.knockback
+            ? { x: dir.x, z: dir.z, distance: def.knockback }
+            : undefined,
         });
         this.effects.spawnBlood(point, normal, 1.1);
         this.audio.playHitFlesh(false);

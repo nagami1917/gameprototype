@@ -14,9 +14,12 @@
  *              attack       -> telegraphed windup, then damage if in reach
  *              hurt         -> short stagger after being shot
  *            Movement always goes through moveCylinder(), so enemies can
- *            never walk through walls, crates or closed doors.
+ *            never walk through walls, crates or closed doors - including the
+ *            knockback shove of a sledgehammer blow, which is integrated here
+ *            and decays away over a third of a second.
  */
 import { moveCylinder, hasLineOfSight } from './collision.js';
+import { KNOCKBACK_DECAY } from './enemy.js';
 
 export const PLAYER_RADIUS = 0.36;
 const PATH_REFRESH = 0.7;      // seconds between full path recalculations
@@ -293,6 +296,22 @@ export class EnemyAI {
    */
   update(e, dt, w) {
     if (e.state === 'spawn' || e.state === 'death') return;
+    // ---- 0. Knockback: a sledgehammer shove, applied before any state logic, so
+    // a staggering blow still slides the body and an armoured enemy that cannot
+    // be staggered is still pushed out of its own attack reach. moveCylinder()
+    // keeps walls solid: a body can be slammed into a wall, never through one.
+    if (e.isKnockedBack()) {
+      moveCylinder(e.position, e.knockX * dt, e.knockZ * dt, e.type.radius, e.type.height, w.colliders);
+      const decay = Math.exp(-KNOCKBACK_DECAY * dt);
+      e.knockX *= decay;
+      e.knockZ *= decay;
+      // Below a few centimetres per second the shove is over; zeroing it keeps
+      // the per-frame check (`isKnockedBack`) from running forever.
+      if (Math.hypot(e.knockX, e.knockZ) < 0.05) {
+        e.knockX = 0;
+        e.knockZ = 0;
+      }
+    }
     const p = w.player;
     const px = p.position.x;
     const pz = p.position.z;
