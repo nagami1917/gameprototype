@@ -79,6 +79,19 @@ export const SPAWN_RISE_TIME = 1.0;
 export const DEATH_FALL_TIME = 0.9;
 export const DEATH_REMOVE_TIME = 3.4;
 const HURT_TIME = 0.2;
+/**
+ * Flinch length for a *heavy* melee blow (the sledgehammer). Three times a
+ * bullet's flinch, which is what makes a 1.3 s swing worth the commitment.
+ */
+export const HEAVY_STAGGER_TIME = 0.45;
+/**
+ * A knockback impulse of `d` metres becomes `d * KNOCKBACK_SPEED` metres per
+ * second, decaying at KNOCKBACK_DECAY per second - a ~0.35 s shove. The AI moves
+ * the body through moveCylinder() like any other movement, so it can slam a
+ * runner into a wall but never through one.
+ */
+export const KNOCKBACK_SPEED = 6;
+export const KNOCKBACK_DECAY = 9;
 
 let nextEnemyId = 1;
 
@@ -340,6 +353,9 @@ export class Enemy {
     this.cooldown = 0.4 + Math.random() * 0.6;
     this.attackTimer = 0;
     this.hurtTimer = 0;
+    this.hurtDuration = HURT_TIME; // what hurtTimer counts down from (a heavy blow is longer)
+    this.knockX = 0;               // decaying shove velocity, integrated by EnemyAI
+    this.knockZ = 0;
     this.wanderTimer = Math.random() * 3;
     this.wanderTarget = null;
     this.stuckSampleTimer = 0.8;
@@ -417,11 +433,62 @@ export class Enemy {
       this.model.root.userData.dying = true;
       return { dealt, killed: true };
     }
-    if (this.type.staggerable && this.state !== 'hurt') {
-      this.hurtTimer = HURT_TIME;
-      this.setState('hurt');
-    }
+    // A bullet flinches whatever `type.staggerable` allows; heavier blows go
+    // through applyStagger() directly, which is also where the exception for
+    // armoured bodies lives.
+    this.applyStagger({});
     return { dealt, killed: false };
+  }
+
+  /**
+   * Puts the enemy into its short flinch.
+   *
+   * Ordinary damage follows `type.staggerable` (armoured is super-armour: it
+   * never loses its swing). A `heavy` blow - the sledgehammer - overrules that,
+   * with one exception, which is the call the roadmap asked for: an armoured
+   * *body* hit does not stagger, because the plates take the force; an armoured
+   * *head* hit does, the same way headshots already bypass armour for damage.
+   * So brute-force alone never beats the brute, and aim still does.
+   *
+   * @param {object} [opts]
+   * @param {boolean} [opts.heavy]     true for a heavy melee blow
+   * @param {boolean} [opts.headshot]  true when the blow landed on the head hitbox
+   * @returns {boolean} true when the enemy flinched this call
+   */
+  applyStagger({ heavy = false, headshot = false } = {}) {
+    if (!this.isTargetable() || this.state === 'hurt') return false;
+    if (!heavy) {
+      if (!this.type.staggerable) return false;
+    } else if (this.type.armor > 0 && !headshot) {
+      return false; // the plate absorbs the hammer: super-armour still means something
+    }
+    this.hurtDuration = heavy ? HEAVY_STAGGER_TIME : HURT_TIME;
+    this.hurtTimer = this.hurtDuration;
+    this.setState('hurt');
+    return true;
+  }
+
+  /**
+   * Shoves the body away from a blow. `distance` is the impulse in metres (the
+   * sledgehammer's is `def.knockback`); it becomes a velocity that EnemyAI
+   * integrates and decays, so the push is smooth, collision-checked and never
+   * teleports anybody.
+   *
+   * @param {number} x  blow direction X (need not be normalised)
+   * @param {number} z  blow direction Z
+   * @param {number} distance  impulse in metres
+   */
+  applyKnockback(x, z, distance) {
+    if (!this.isTargetable() || !(distance > 0)) return;
+    const len = Math.hypot(x, z);
+    if (!(len > 1e-6)) return;
+    this.knockX += (x / len) * distance * KNOCKBACK_SPEED;
+    this.knockZ += (z / len) * distance * KNOCKBACK_SPEED;
+  }
+
+  /** True while a blow is still moving the body. */
+  isKnockedBack() {
+    return this.knockX !== 0 || this.knockZ !== 0;
   }
 
   /** Sets facing (yaw) toward a target angle with smooth turning. */
@@ -483,7 +550,9 @@ export class Enemy {
     }
 
     if (this.state === 'hurt') {
-      const f = Math.max(0, this.hurtTimer / HURT_TIME);
+      // Normalised against the flinch the enemy actually got, so a sledgehammer
+      // blow reads as one long lean-back instead of a flicker.
+      const f = Math.min(1, Math.max(0, this.hurtTimer / this.hurtDuration));
       this.model.body.rotation.x = -0.25 * f;
       this.hurtTimer -= dt;
     }

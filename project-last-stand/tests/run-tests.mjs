@@ -468,7 +468,9 @@ async function main() {
       assertEqual(weapon.WEAPON_DEFS[id].category, weapon.SLOT_CATEGORIES[i], `slot ${i + 1} accepts the right category`);
       assertEqual(weapon.WEAPON_DEFS[id].slot, i + 1, `${id} keeps its default slot`);
     });
-    assertEqual(weapon.hudSlotLabels().join('|'), '1 RIFLE|2 SHOTGUN|3 KNIFE|4 PIPE|5 AXE', 'HUD labels');
+    // The always-carried sidearm takes the key after the loadout slots, so the
+    // HUD lists six chips even though the loadout itself is still five keys.
+    assertEqual(weapon.hudSlotLabels().join('|'), '1 RIFLE|2 SHOTGUN|3 KNIFE|4 PIPE|5 AXE|6 SIDEARM', 'HUD labels');
   });
 
   test('sanitizeLoadout drops duplicates, unknown ids and wrong-category picks', () => {
@@ -504,7 +506,15 @@ async function main() {
     assertEqual(slots[0].category, 'firearm', 'slot 1 is a firearm slot');
     assertEqual(slots[2].category, 'melee', 'slot 3 is a melee slot');
     const offered = new Set(slots.flatMap((s) => s.options.map((o) => o.id)));
-    assertEqual(offered.size, Object.keys(weapon.WEAPON_DEFS).length, 'every weapon is offered somewhere');
+    // Every weapon is offered somewhere *except* the always-carried ones: there
+    // is nothing to choose, they are in the kit either way (weapon.js
+    // ALWAYS_CARRIED). The count is derived, so a second always-carried weapon
+    // cannot quietly go missing from the screen.
+    assertEqual(offered.size, Object.keys(weapon.WEAPON_DEFS).length - weapon.ALWAYS_CARRIED.length,
+      'every pickable weapon is offered somewhere');
+    for (const id of weapon.ALWAYS_CARRIED) {
+      assert(!offered.has(id), `${id} is always carried and must not be a loadout pick`);
+    }
   });
 
   test('the S-9 VIPER and MKR-1 MARKSMAN match the roadmap stats', () => {
@@ -554,7 +564,14 @@ async function main() {
         assertEqual(weapon.AMMO_PICKUP[id], undefined, `${id} must not receive ammo pickups`);
         continue;
       }
-      assert(weapon.AMMO_PICKUP[id] > 0, `${id} needs an AMMO_PICKUP amount`);
+      // Named exemption, not a silent skip: an always-carried weapon never takes
+      // a crate - it refills itself at every intermission (refillAlwaysCarried())
+      // - so it must have *no* pickup row, and that is asserted here.
+      if (weapon.ALWAYS_CARRIED.includes(id)) {
+        assertEqual(weapon.AMMO_PICKUP[id], undefined, `${id} is pickup-fed by the intermission refill, not by crates`);
+      } else {
+        assert(weapon.AMMO_PICKUP[id] > 0, `${id} needs an AMMO_PICKUP amount`);
+      }
       const profile = audio.shotProfile(def.sound);
       assert(profile && profile.body, `${id} (sound '${def.sound}') needs a SHOT_PROFILES row`);
     }
@@ -963,7 +980,13 @@ async function main() {
         assertEqual(system.models[2].group.parent, system.melee.socket, 'melee viewmodels use the arm rig');
         assertEqual(system.requestSwitch(4), true, 'key 5 works');
         assertEqual(system.def.id, 'pipe', 'key 5 draws the pipe');
-        assertEqual(system.requestSwitch(5), false, 'there is no key 6');
+        // The always-carried sidearm owns the key after the last loadout slot:
+        // the kit is five *chosen* weapons plus it. See the milestone-4 tests.
+        assertEqual(system.slotCount, weapon.SLOT_COUNT + weapon.ALWAYS_CARRIED.length, 'one key per slot plus the sidearm');
+        assertEqual(system.requestSwitch(5), true, 'key 6 works');
+        assertEqual(system.def.id, 'pistol', 'key 6 draws the sidearm');
+        assertEqual(system.getHudData().slot, 6, 'the sidearm reports its own key');
+        assertEqual(system.requestSwitch(6), false, 'there is no key 7');
 
         system.setLoadout(weapon.DEFAULT_LOADOUT);
         assertEqual(system.loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'loadout swapped');
@@ -1071,11 +1094,20 @@ async function main() {
           const model = system.viewmodels.get(id);
           assert(model && model.group, `${id} needs a viewmodel`);
         }
-        for (const id of ['rifle', 'shotgun', 'smg', 'dmr']) {
+        for (const id of ['rifle', 'shotgun', 'smg', 'dmr', 'pistol']) {
           const model = system.viewmodels.get(id);
           assert(model.muzzle, `${id} needs a muzzle marker for its flash sprite`);
           assert(model.flash?.isSprite, `${id} needs a muzzle flash sprite`);
           assert(model.barrelLength > 0.2, `${id} barrel length`);
+        }
+        // Every melee weapon has to offer the arm rig a grip point and a blade
+        // trail, and it is attached to the hand socket from the start: a viewmodel
+        // that is never in a loadout still has to be in the scene graph for
+        // prewarmShaders() to compile it.
+        for (const id of ['knife', 'pipe', 'axe', 'machete', 'sledge']) {
+          const model = system.viewmodels.get(id);
+          assert(model.grip && model.trail, `${id} needs a grip point and a trail for the arm rig`);
+          assertEqual(model.group.parent, system.melee.socket, `${id} starts the run on the hand socket`);
         }
         // The parametric builder merges its primitives per material, so a
         // spec with 15 parts is still a handful of meshes.
@@ -1911,6 +1943,443 @@ async function main() {
         assertEqual(spawned.length, 1, 'the round launched');
         assert(spawned[0].z < 0 && spawned[0].z > -0.36,
           `the spawn point must stay inside the player's own radius (z=${spawned[0].z})`);
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  /* ---------------- milestone 4: melee + always-carried sidearm ---------------- */
+  const gameModule = await import(pathToFileURL(path.join(JS_DIR, 'game.js')).href);
+  console.log('\nMelee + sidearm');
+
+  /** A real Enemy on a stub scene, out of its spawn rise and in play. */
+  function makeEnemy(typeId = 'infected', x = 0, z = 0) {
+    const enemy = new enemyDefs.Enemy({
+      scene: { add() {}, remove() {} },
+      typeId,
+      x,
+      z,
+      multipliers: { health: 1, damage: 1, speed: 1 },
+    });
+    enemy.setState('chase'); // spawn-rise is not targetable: take it to the fight
+    return enemy;
+  }
+
+  /** Minimal world context for EnemyAI.update(), for the knockback step. */
+  function makeAIWorld(playerPos = { x: 0, z: -4 }, colliders = []) {
+    return {
+      player: { position: { x: playerPos.x, y: 0, z: playerPos.z }, alive: true },
+      colliders,
+      nav: { isWalkableWorld: () => true, findPath: () => null },
+      enemies: [],
+      time: 0,
+      noise: null,
+      huntAll: false,
+      requestPath: () => true,
+      damagePlayer: () => {},
+    };
+  }
+
+  test('the CLEAVER MACHETE and SLEDGEHAMMER match the roadmap block and pass the schema', () => {
+    const machete = weapon.WEAPON_DEFS.machete;
+    assertEqual(machete.name, 'CLEAVER MACHETE', 'machete name');
+    assertEqual(machete.category, 'melee', 'machete category');
+    assertEqual(machete.damage, 58, 'machete damage');
+    assertEqual(machete.reach, 1.85, 'machete reach');
+    assertEqual(machete.arcDegrees, 55, 'machete arc');
+    assertEqual(machete.maxTargets, 3, 'machete targets');
+    assertEqual(machete.swing, 'sweep', 'machete swing style');
+    assertEqual(machete.attackCooldown, 0.5, 'machete cycle');
+
+    const sledge = weapon.WEAPON_DEFS.sledge;
+    assertEqual(sledge.name, 'SLEDGEHAMMER', 'sledge name');
+    assertEqual(sledge.damage, 140, 'sledge damage');
+    assertEqual(sledge.reach, 2.1, 'sledge reach');
+    assertEqual(sledge.arcDegrees, 24, 'sledge arc');
+    assertEqual(sledge.maxTargets, 1, 'sledge hits one body');
+    assertEqual(sledge.swing, 'smash', 'sledge swing style');
+    assertEqual(sledge.attackCooldown, 1.3, 'sledge cycle');
+    assertEqual(sledge.heavyStagger, true, 'the hammer always staggers');
+    assert(sledge.knockback > 0, 'the hammer shoves');
+    assert(weapon.validateWeaponDef(machete).valid, `machete schema: ${weapon.validateWeaponDef(machete).errors.join('; ')}`);
+    assert(weapon.validateWeaponDef(sledge).valid, `sledge schema: ${weapon.validateWeaponDef(sledge).errors.join('; ')}`);
+
+    // Roles: the machete is the sweep, the sledge is the commitment.
+    const pipe = weapon.WEAPON_DEFS.pipe;
+    const axe = weapon.WEAPON_DEFS.axe;
+    assert(machete.arcDegrees > pipe.arcDegrees && machete.maxTargets > pipe.maxTargets,
+      'the machete sweeps wider than the pipe');
+    assert(machete.attackCooldown < pipe.attackCooldown, 'and faster');
+    assert(sledge.damage > axe.damage && sledge.attackCooldown > axe.attackCooldown,
+      'the sledge trades speed for one huge blow');
+    assert(sledge.windup > Math.max(weapon.WEAPON_DEFS.knife.windup, pipe.windup, axe.windup, machete.windup),
+      'and telegraphs longer than any other melee weapon');
+
+    for (const def of [machete, sledge]) {
+      assertEqual(def.ammoKind, undefined, `${def.id} is melee and carries no ammo kind`);
+      assertEqual(def.magazineSize, undefined, `${def.id} must not define a magazine`);
+      assertEqual(weapon.AMMO_PICKUP[def.id], undefined, `${def.id} takes no ammo pickups`);
+      const tl = meleeAnim.swingTimeline(def);
+      assert(0 < tl.windup && tl.windup < tl.impact && tl.impact < tl.follow && tl.follow < tl.end,
+        `${def.id} timeline must be ordered`);
+      assert(def.hitTime > tl.windup && def.hitTime + def.activeTime < tl.follow, `${def.id} hit window inside the strike`);
+      assert(def.attackCooldown > def.attackDuration, `${def.id} cooldown must outlast the swing`);
+      // The style name has to resolve: a typo would fall back to 'slash' in silence.
+      assert(meleeAnim.STYLE_POSES[def.swing], `${def.id} names a swing style that exists`);
+    }
+    // Only the sledge carries the new melee extras: the other swings are untouched.
+    for (const id of ['knife', 'pipe', 'axe', 'machete']) {
+      assertEqual(weapon.WEAPON_DEFS[id].heavyStagger, undefined, `${id} must not stagger super-armour`);
+      assertEqual(weapon.WEAPON_DEFS[id].knockback, undefined, `${id} must not shove`);
+    }
+    // Schema: the two new fields are optional, melee-only and validated when present.
+    assert(weapon.validateWeaponDef({ ...sledge, heavyStagger: 'yes' }).errors.some((e) => e.includes('heavyStagger')),
+      'heavyStagger must be a boolean');
+    assert(weapon.validateWeaponDef({ ...sledge, knockback: -1 }).errors.some((e) => e.includes('knockback')),
+      'knockback cannot be negative');
+    assert(weapon.validateWeaponDef({ ...weapon.WEAPON_DEFS.rifle, recoil: { ...weapon.WEAPON_DEFS.rifle.recoil }, knockback: 1 })
+      .errors.some((e) => e.includes('knockback')), 'a firearm must not define knockback');
+    assert(weapon.validateWeaponDef({ ...weapon.WEAPON_DEFS.rifle, recoil: { ...weapon.WEAPON_DEFS.rifle.recoil }, heavyStagger: true })
+      .errors.some((e) => e.includes('heavyStagger')), 'a firearm must not define heavyStagger');
+  });
+
+  test('the sweep and smash poses start at rest, move smoothly and mirror for backhands', () => {
+    const rest = meleeAnim.REST_POSE;
+    for (const id of ['machete', 'sledge']) {
+      const def = weapon.WEAPON_DEFS[id];
+      const start = meleeAnim.swingPoseAt(def, 0);
+      const end = meleeAnim.swingPoseAt(def, def.attackDuration);
+      for (const k of Object.keys(rest)) {
+        assertNear(start[k], rest[k], 1e-9, `${id} start ${k}`);
+        assertNear(end[k], rest[k], 1e-9, `${id} end ${k}`);
+      }
+      // No jumps: the same 240 Hz guard the knife has, so a new pose set cannot
+      // teleport the arm between frames.
+      let prev = start;
+      for (let t = 1 / 240; t <= def.attackDuration; t += 1 / 240) {
+        const p = meleeAnim.swingPoseAt(def, t);
+        for (const k of Object.keys(rest)) {
+          assert(Math.abs(p[k] - prev[k]) < 0.25, `${id}: ${k} jumps at t=${t.toFixed(3)}`);
+        }
+        prev = p;
+      }
+      const tl = meleeAnim.swingTimeline(def);
+      const windup = meleeAnim.swingPoseAt(def, tl.windup);
+      const backhand = meleeAnim.swingPoseAt(def, tl.windup, 'left');
+      assertNear(backhand.sy - rest.sy, -(windup.sy - rest.sy), 1e-9, `${id} backhand mirrors shoulder yaw`);
+      assertNear(backhand.sr - rest.sr, -(windup.sr - rest.sr), 1e-9, `${id} backhand mirrors shoulder roll`);
+      assertNear(backhand.sp, windup.sp, 1e-9, `${id} backhand keeps shoulder pitch`);
+      assertNear(backhand.el, windup.el, 1e-9, `${id} backhand keeps the elbow bend`);
+    }
+
+    // The sweep is the horizontal one: pull right, cut all the way left, level.
+    const machete = weapon.WEAPON_DEFS.machete;
+    const mTl = meleeAnim.swingTimeline(machete);
+    const mWind = meleeAnim.swingPoseAt(machete, mTl.windup);
+    const mImpact = meleeAnim.swingPoseAt(machete, mTl.impact);
+    assert(mWind.sy < rest.sy && mImpact.sy > rest.sy, 'the sweep winds up right and cuts left');
+    assert(Math.abs(mImpact.sp - rest.sp) < 0.5, 'and stays level: it is a sweep, not a chop');
+
+    // The smash is the vertical one: up behind the shoulder, then straight down,
+    // with the follow-through lower than the impact.
+    const sledge = weapon.WEAPON_DEFS.sledge;
+    const sTl = meleeAnim.swingTimeline(sledge);
+    const sWind = meleeAnim.swingPoseAt(sledge, sTl.windup);
+    const sImpact = meleeAnim.swingPoseAt(sledge, sTl.impact);
+    const sFollow = meleeAnim.swingPoseAt(sledge, sTl.follow);
+    assert(sWind.sp > rest.sp && sWind.el < rest.el, 'the smash raises the arm overhead');
+    assert(sImpact.sp < sWind.sp, 'and brings it down');
+    assert(sFollow.sp < sImpact.sp, 'the follow-through drives below the impact');
+  });
+
+  test('the sledgehammer staggers everything except an armoured body blow', () => {
+    const infected = makeEnemy('infected');
+    const armored = makeEnemy('armored');
+    const dying = makeEnemy('infected');
+    try {
+      assertEqual(infected.type.staggerable, true, 'infected are staggerable');
+      assertEqual(armored.type.staggerable, false, 'armoured is super-armour');
+      // Ordinary blows behave exactly as before.
+      assertEqual(infected.applyStagger({}), true, 'an ordinary blow flinches an infected');
+      assertNear(infected.hurtTimer, 0.2, 1e-9, 'a bullet-size flinch');
+      infected.setState('chase');
+      assertEqual(armored.applyStagger({}), false, 'super-armour shrugs off an ordinary blow');
+      assertEqual(armored.state, 'chase', 'and never loses its swing');
+      // Heavy blows: the sledgehammer's `heavyStagger`.
+      assertEqual(infected.applyStagger({ heavy: true }), true, 'a hammer always flinches an infected');
+      assertNear(infected.hurtTimer, enemyDefs.HEAVY_STAGGER_TIME, 1e-9, 'a heavy flinch is its own length');
+      assert(enemyDefs.HEAVY_STAGGER_TIME > 0.2, 'and visibly longer than a bullet flinch');
+      // The call the roadmap asked for: an armoured *body* blow is the exception.
+      assertEqual(armored.applyStagger({ heavy: true }), false, 'the plate takes the hammer');
+      assertEqual(armored.state, 'chase', 'so brute force alone never beats the brute');
+      // A head blow beats the plate, exactly as headshots bypass armour for damage.
+      assertEqual(armored.applyStagger({ heavy: true, headshot: true }), true, 'a head hit staggers the brute');
+      assertEqual(armored.state, 'hurt', 'and it loses its swing');
+      // takeDamage keeps its own rule: bullets never stagger super-armour.
+      const armored2 = makeEnemy('armored');
+      armored2.takeDamage(30);
+      assertEqual(armored2.state, 'chase', 'a body shot does not stagger the brute');
+      const infected2 = makeEnemy('infected');
+      infected2.takeDamage(10);
+      assertEqual(infected2.state, 'hurt', 'a body shot does stagger an infected');
+      // A dying enemy has nothing left to flinch.
+      dying.health = 1;
+      dying.takeDamage(50);
+      assertEqual(dying.state, 'death', 'the blow killed it');
+      assertEqual(dying.applyStagger({ heavy: true }), false, 'a corpse cannot be staggered');
+    } finally {
+      for (const e of [infected, armored, dying]) e.dispose();
+    }
+  });
+
+  test('a hammer blow shoves a body, and a wall still stops it', () => {
+    const ai = new enemyAI.EnemyAI();
+    const infected = makeEnemy('infected');
+    const blocked = makeEnemy('infected');
+    try {
+      const world = makeAIWorld();
+      infected.aggro = true;
+      // Nothing to shove with: a zero direction or a zero impulse is a no-op.
+      infected.applyKnockback(0, 0, 1.2);
+      infected.applyKnockback(1, 0, 0);
+      assertEqual(infected.isKnockedBack(), false, 'an empty shove does nothing');
+
+      infected.applyKnockback(1, 0, weapon.WEAPON_DEFS.sledge.knockback);
+      assert(infected.isKnockedBack(), 'the body is being pushed');
+      const startX = infected.position.x;
+      const startV = infected.knockX;
+      assertNear(startV, weapon.WEAPON_DEFS.sledge.knockback * enemyDefs.KNOCKBACK_SPEED, 1e-9,
+        'the impulse becomes a velocity: metres x KNOCKBACK_SPEED');
+      // The AI hands moveCylinder() exactly (knockX, knockZ) * dt each frame, so
+      // summing that is how far the shove itself carried the body. A decaying
+      // velocity integrates to v0 / KNOCKBACK_DECAY = 7.2 / 9 = 0.8 m - the body
+      // is pushed, not teleported, and it stops in about a third of a second.
+      let shoved = 0;
+      for (let i = 0; i < 36; i++) {
+        shoved += infected.knockX / 60;
+        ai.update(infected, 1 / 60, world);
+      }
+      // (The frame-stepped sum reads a touch over the 0.8 m continuous integral,
+      // because each frame carries the velocity it started with.)
+      assert(shoved > 0.7 && shoved < 0.95, `a 1.2 m impulse carries about 0.8 m, got ${shoved.toFixed(3)}`);
+      assert(infected.position.x - startX > 0.35, 'and the body really moved');
+      assertEqual(infected.isKnockedBack(), false, 'the shove is over');
+      assertEqual(infected.state, 'chase', 'the AI state machine kept running throughout');
+
+      // The same shove into a wall: moveCylinder() keeps the wall solid.
+      const wall = createBox(1, 0, -2, 2, 4, 2, 'wall');
+      const wallWorld = makeAIWorld({ x: 0, z: -4 }, [wall]);
+      blocked.aggro = true;
+      blocked.applyKnockback(1, 0, 4); // deliberately oversized: it must still not pass
+      for (let i = 0; i < 60; i++) ai.update(blocked, 1 / 60, wallWorld);
+      assert(blocked.position.x <= 1 - blocked.type.radius + 1e-6,
+        `the wall stopped the shove (x=${blocked.position.x})`);
+      assert(blocked.position.x > 0.3, 'but the body still moved into the wall');
+    } finally {
+      for (const e of [infected, blocked]) e.dispose();
+    }
+  });
+
+  test('a sledgehammer hit reports a heavy stagger and a shove; the machete reports neither', () => {
+    withDocumentStub(() => {
+      const hits = [];
+      const camera = new THREE.PerspectiveCamera();
+      camera.position.set(0, 1.5, 0);
+      camera.lookAt(0, 1.5, -1);
+      camera.updateMatrixWorld(true);
+      const system = new weapon.WeaponSystem({
+        camera,
+        loadout: ['rifle', 'shotgun', 'sledge', 'pipe', 'machete'],
+        audio: {
+          playSwitch() {}, playDryFire() {}, playReload() {}, playShot() {}, playHitFlesh() {}, playMeleeSwing() {},
+        },
+        effects: { spawnBlood() {}, spawnImpact() {}, spawnTracer() {} },
+        player: { addRecoil() {}, addTrauma() {} },
+        hooks: { onEnemyHit: (info) => { hits.push(info); return { killed: false }; } },
+      });
+      const hitbox = makeTargetHitbox();
+      const ctx = { canFire: true, colliders: [], hitboxes: () => [hitbox], speedFactor: 0, bobPhase: 0 };
+      /** Draws the weapon in `slot` and runs one swing to completion. */
+      const swing = (slot, seconds) => {
+        const before = hits.length;
+        system.requestSwitch(slot);
+        system.update(0.8, {}, ctx); // finish the draw
+        system.update(0.001, { firePressed: true }, ctx);
+        for (let i = 0; i < Math.ceil(seconds * 60); i++) system.update(1 / 60, {}, ctx);
+        return hits.length > before;
+      };
+      try {
+        assert(swing(2, 0.8), 'the sledgehammer connected');
+        const hammer = hits[hits.length - 1];
+        assertEqual(hammer.weapon, 'sledge', 'the hit reports the hammer');
+        assertEqual(hammer.damage, 140, 'one blow, 140 damage');
+        assertEqual(hammer.stagger, 'heavy', 'and it asks for the heavy stagger');
+        assert(hammer.knockback, 'plus a shove');
+        assertEqual(hammer.knockback.distance, weapon.WEAPON_DEFS.sledge.knockback, 'the def decides the impulse');
+        // The target is straight down the camera, so the shove points downrange:
+        // the ray that landed sits inside the 24-degree fan, which is why the x
+        // component is small but not zero.
+        assertNear(Math.hypot(hammer.knockback.x, hammer.knockback.z), 1, 1e-9, 'the shove direction is a unit vector');
+        assert(hammer.knockback.z < -0.9, 'the shove points downrange');
+        assert(Math.abs(hammer.knockback.x) <= Math.sin(weapon.WEAPON_DEFS.sledge.arcDegrees * Math.PI / 360) + 1e-9,
+          'and stays inside the swing arc');
+        // A hook is allowed to keep what it was handed: the shove must be a copy,
+        // not the ray-scratch vector the next swing overwrites.
+        assert(hammer.knockback !== system._dir, 'the shove is not aliased to the ray scratch');
+
+        assert(swing(4, 0.6), 'the machete connected');
+        const cleaver = hits[hits.length - 1];
+        assertEqual(cleaver.weapon, 'machete', 'the hit reports the machete');
+        assertEqual(cleaver.damage, 58, '58 a swing');
+        assertEqual(cleaver.stagger, undefined, 'the machete does not stagger super-armour');
+        assertEqual(cleaver.knockback, undefined, 'and does not shove: the old melee swings are untouched');
+      } finally {
+        system.dispose();
+        hitbox.geometry.dispose();
+        hitbox.material.dispose();
+      }
+    });
+  });
+
+  test('the MK2 SIDEARM matches the roadmap block and is never a loadout pick', () => {
+    const def = weapon.WEAPON_DEFS.pistol;
+    assertEqual(def.name, 'MK2 SIDEARM', 'name');
+    assertEqual(def.category, 'firearm', 'category');
+    assertEqual(def.ammoKind, 'rifle', 'it shares the rifle crates it never takes');
+    assertEqual(def.damage, 30, 'damage');
+    assertEqual(def.fireRate, 5, 'rate of fire');
+    assertEqual(def.auto, false, 'semi-auto: one click, one round');
+    assertEqual(def.magazineSize, 12, 'magazine');
+    assertEqual(def.startReserve, 36, 'reserve');
+    assertEqual(def.maxReserve, 36, 'a capped pool: it is a backup, not a primary');
+    assertEqual(def.reloadTime, 1.3, 'reload');
+    assertNear(weapon.sustainedDps(def), 97, 1, 'about 97 sustained dps');
+    const dps = weapon.sustainedDps(def);
+    assert(dps >= 60 && dps <= 160, `the sidearm must sit inside the balance band (${dps.toFixed(1)})`);
+    assert(def.switchTime < weapon.WEAPON_DEFS.smg.switchTime, 'the fastest draw in the game');
+    assert(weapon.validateWeaponDef(def).valid, `schema: ${weapon.validateWeaponDef(def).errors.join('; ')}`);
+
+    // Weak vs armour: armour is not bypassed, and half a magazine of body shots
+    // does not drop the brute, so the sidearm is a backup even against armour.
+    const armored = enemyDefs.ENEMY_TYPES.armored;
+    const perBodyShot = Math.max(1, Math.round(def.damage * (1 - armored.armor)));
+    assertEqual(perBodyShot, 20, 'an armoured body shot takes 30 x 0.65');
+    assert(perBodyShot * Math.ceil(def.magazineSize / 2) < armored.maxHealth,
+      'half a sidearm magazine does not clear an armoured infected');
+
+    // Availability: always carried, never picked, never fed by a crate.
+    assert(weapon.ALWAYS_CARRIED.includes('pistol'), 'the sidearm is always carried');
+    assertEqual(weapon.AMMO_PICKUP.pistol, undefined, 'the intermission refill feeds it, not crates');
+    const allPistols = weapon.sanitizeLoadout(['pistol', 'pistol', 'pistol', 'pistol', 'pistol']);
+    assert(!allPistols.includes('pistol'), 'the sidearm cannot occupy a loadout slot');
+    assertEqual(new Set(allPistols).size, weapon.SLOT_COUNT, 'and the kit is still complete');
+    assertEqual(weapon.sanitizeLoadout(['shotgun', 'dmr', 'axe', 'pipe', 'axe']).join(','),
+      'shotgun,dmr,axe,pipe,knife', 'the rest of the kit is unaffected by the refusal');
+    const offered = weapon.loadoutSlotOptions().flatMap((slot) => slot.options.map((option) => option.id));
+    assert(!offered.includes('pistol'), 'the loadout screen does not offer it: there is nothing to choose');
+  });
+
+  test('the sidearm keeps its own key, ignores crates and refills every intermission', () => {
+    withDocumentStub(() => {
+      const { camera, system } = makeWeaponSystem(['shotgun', 'dmr', 'axe', 'pipe', 'knife']);
+      try {
+        assertEqual(system.slotCount, 6, 'five loadout keys plus the sidearm');
+        assertEqual(system.slotIds.join(','), 'shotgun,dmr,axe,pipe,knife,pistol', 'the sidearm is the last key');
+        assertEqual(system.states[5].def.id, 'pistol', 'state 6 is the sidearm');
+        assertEqual(system.models[5].group.parent, camera, 'its viewmodel hangs off the camera like any firearm');
+        assertEqual(system.states[5].reserve, 36, 'a fresh run starts it full');
+
+        // A loadout change never costs the player the sidearm.
+        system.setLoadout(['launcher', 'smg', 'machete', 'sledge', 'axe']);
+        assertEqual(system.slotIds[5], 'pistol', 'a kit swap keeps the sidearm');
+        assertEqual(system.slotCount, 6, 'and the key count stays stable');
+
+        // A crate never touches it: needsAmmo() ignores it and addAmmo() skips it.
+        system.states.forEach((st, i) => { if (i !== 5) st.reserve = st.def.maxReserve; });
+        system.states[5].reserve = 0;
+        assertEqual(system.needsAmmo(), false, 'a dry sidearm does not make a crate collectable');
+        assertEqual(system.addAmmo(), false, 'and a crate gives it nothing');
+        assertEqual(system.states[5].reserve, 0, 'it stays dry until the intermission');
+
+        // Intermission refill: back to 36, nothing else touched, idempotent.
+        const others = system.states.slice(0, 5).map((st) => st.reserve).join(',');
+        assertEqual(system.refillAlwaysCarried(), true, 'the refill reports that it did something');
+        assertEqual(system.states[5].reserve, weapon.WEAPON_DEFS.pistol.startReserve, 'to 36 rounds');
+        assertEqual(system.states.slice(0, 5).map((st) => st.reserve).join(','), others, 'and nothing else changes');
+        assertEqual(system.refillAlwaysCarried(), false, 'a second call in the same break is a no-op');
+
+        // It is an ordinary firearm to the HUD.
+        system.requestSwitch(5);
+        const hud = system.getHudData();
+        assertEqual(hud.name, 'MK2 SIDEARM', 'HUD name');
+        assertEqual(hud.hasAmmo, true, 'it renders an ammo block');
+        assertEqual(hud.slot, 6, 'key 6');
+        assertEqual(hud.ammo, 12, 'a full magazine');
+
+        // ...and on the trigger: the ordinary hitscan path, 30 a round, one round
+        // out of the magazine (no new firing code was added for it).
+        const { system: shooter, hits, ctx: rangeCtx } = makeRange();
+        try {
+          assertEqual(shooter.requestSwitch(5), true, 'draw the sidearm in the range');
+          shooter.update(0.4, {}, rangeCtx); // finish the draw
+          shooter.update(1 / 60, { firePressed: true }, rangeCtx);
+          assertEqual(hits.length, 1, 'one round, one hit');
+          assertEqual(hits[0].weapon, 'pistol', 'the hit reports the sidearm');
+          assertEqual(hits[0].damage, 30, '30 damage a round');
+          assertEqual(shooter.getHudData().ammo, 11, 'and one round left the magazine');
+        } finally {
+          shooter.dispose();
+        }
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('the real intermission event refills the sidearm (WaveManager -> Game.onWaveEvent)', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem(['rifle', 'shotgun', 'knife', 'pipe', 'axe']);
+      system.states[5].reserve = 0; // a spent sidearm coming out of a wave
+      const toasts = [];
+      const events = [];
+      // A bare Game: the real onWaveEvent() body with its DOM-facing collaborators
+      // stubbed, so the wiring under test is the one the browser runs.
+      const bareGame = Object.create(gameModule.Game.prototype);
+      Object.assign(bareGame, {
+        stats: { wave: 0, score: 0 },
+        level: { pickups: { setAllActive() {} } },
+        ui: {
+          setCountdown() {},
+          showBanner() {},
+          toast: (text) => toasts.push(text),
+        },
+        audio: { playWaveStart() {}, playWaveClear() {} },
+        weapons: system,
+      });
+      try {
+        const manager = new wm.WaveManager({
+          spawnEnemy: () => true,
+          onEvent: (name, payload) => {
+            events.push(name);
+            bareGame.onWaveEvent(name, payload);
+          },
+        });
+        manager.start();
+        manager.update(wm.COUNTDOWN_SECONDS + 1, 0); // countdown over: wave 1 is live
+        assertEqual(manager.phase, 'active', 'the wave started');
+        for (let i = 0; i < 2400 && manager.phase === 'active'; i++) manager.update(0.05, 0);
+        assertEqual(manager.phase, 'intermission', 'the wave ended into the break');
+        assert(events.includes('waveCleared'), 'waveCleared is the "intermission starts" event');
+        assertNear(manager.timer, wm.INTERMISSION_SECONDS, 0.06, 'and the break is the full intermission');
+        assertEqual(system.states[5].reserve, 36, 'the sidearm came back at the intermission');
+        assert(toasts.includes('SIDEARM RESTOCKED'), 'with a line in the toast stack');
+        assert(bareGame.stats.score > 0, 'the clear bonus still landed');
+        // The toast is only for an actual refill: a full sidearm stays quiet.
+        toasts.length = 0;
+        bareGame.onWaveEvent('waveCleared', { wave: 2, bonus: 600 });
+        assert(!toasts.includes('SIDEARM RESTOCKED'), 'no refill, no toast');
+        assert(toasts.includes('Supply crates restocked'), 'the crates still restock');
       } finally {
         system.dispose();
       }

@@ -53,6 +53,7 @@ composition, shotgun falloff and LocalStorage handling.
 | Shift | Sprint (forward only) |
 | Space | Jump; with a melee weapon drawn, swing instead (no jump) |
 | 1–5 | Draw the weapon in that slot (firearms on 1–2, melee on 3–5; see LOADOUT in the menu) |
+| 6 | Draw the MK2 SIDEARM: always carried, never in the LOADOUT screen, refilled at every intermission |
 
 Melee swings: hold A or D while attacking (or flick the mouse) for a backhand or
 forehand swing. Each swing has a wind-up, a strike and a recovery, and hits each enemy
@@ -79,11 +80,24 @@ Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
   into a wall at point blank cannot hurt you through it, but a round that goes off
   in the open next to you hurts for half. One round up the tube, 2.8 s reload, six
   in reserve, and the LOADOUT screen lists it next to the shotgun and the marksman.
+- **MK2 Sidearm**: 30 damage per semi-automatic round, 12-round magazine, 1.3 s reload
+  and the fastest draw in the game, with a mild falloff past 18 m. It is always carried
+  on key 6 — the LOADOUT screen cannot leave it behind — and it never takes ammo crates:
+  it tops itself back up to 36 rounds at the start of every intermission, so a player
+  whose rifle has run dry is never weaponless. Weak against armour: a body shot loses
+  the brute's 35% and half a magazine does not drop one.
 - **Loadout**: the LOADOUT screen in the main menu picks which weapon sits in each of
   the five keys. It is saved with the settings.
 - **Field Knife**: quick, short-range single-target slash; no ammunition required.
 - **Steel Pipe**: wider, two-target sweep with moderate damage and reach.
+- **Cleaver Machete**: the fastest melee weapon in the game (0.5 s cycle) and the widest
+  swing (55 degrees, three targets a cut), for hit-and-run players who want the pipe's
+  job done quicker.
 - **Fire Axe**: slow, heavy close-range strike with high damage.
+- **Sledgehammer**: 140 damage on one target, 2.1 m reach, 1.3 s between blows. It is
+  the only weapon that shoves: a blow knocks the target back ~0.8 m, and it staggers
+  everything it hits — including super-armour — with one exception: an armoured body
+  blow is absorbed by the plates. Hit the head and even the brute loses its swing.
   Melee hits respect walls and doors, can stagger susceptible infected, and inherit
   the existing armored-enemy damage reduction.
 - **Infected**: Basic (moderate HP and speed), Runner (fast, low HP), Armored (slow,

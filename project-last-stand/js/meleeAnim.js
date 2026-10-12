@@ -55,8 +55,12 @@ export const REST_POSE = Object.freeze({
 /** Keys that flip sign when the swing is mirrored (left-facing / backhand). */
 const MIRROR_KEYS = new Set(['sy', 'sr', 'wy', 'wr', 'rx']);
 
-/** Keyframes for the two swing styles. */
-const STYLE_POSES = Object.freeze({
+/**
+ * Keyframes per swing style, keyed by `def.swing`. Exported so a test can prove
+ * every melee def names a style that exists - a typo would otherwise fall back
+ * to `slash` in silence.
+ */
+export const STYLE_POSES = Object.freeze({
   // Quick horizontal slash (knife, pipe): wind up low-right, cut across to the left.
   slash: Object.freeze({
     windup: { sy: -0.59, sp: -0.36, sr: 0.41, el: 1.79, wy: -0.47, wp: -0.58, wr: 1.0, rx: 0.02, ry: 0.02, rz: 0.02 },
@@ -68,6 +72,22 @@ const STYLE_POSES = Object.freeze({
     windup: { sy: -0.75, sp: 0.42, sr: 0.9, el: 1.21, wy: -1.0, wp: -0.49, wr: -1.0, rx: 0.02, ry: 0.05, rz: 0.0 },
     impact: { sy: 0.33, sp: -0.14, sr: 0.46, el: 1.0, wy: 0.48, wp: -1.34, wr: 1.0, rx: -0.02, ry: -0.04, rz: -0.06 },
     follow: { sy: 0.37, sp: -0.43, sr: 0.58, el: 1.0, wy: 0.59, wp: -1.22, wr: 1.0, rx: -0.03, ry: -0.08, rz: -0.08 },
+  }),
+  // Wide flat cut (machete): a long pull-back to the right, then a level sweep
+  // that crosses the whole body - the arm barely bends, which is what makes it
+  // read as a *sweep* rather than a slash. The strike is short and quick.
+  sweep: Object.freeze({
+    windup: { sy: -0.8, sp: -0.3, sr: 0.5, el: 1.85, wy: -0.55, wp: -0.5, wr: 1.0, rx: 0.03, ry: 0.03, rz: 0.02 },
+    impact: { sy: 0.62, sp: -0.16, sr: 0.16, el: 0.62, wy: 0.4, wp: -0.55, wr: 1.0, rx: -0.04, ry: -0.03, rz: -0.05 },
+    follow: { sy: 0.86, sp: -0.12, sr: 0.55, el: 0.5, wy: 0.36, wp: -0.42, wr: 1.0, rx: -0.06, ry: -0.06, rz: -0.07 },
+  }),
+  // Two-handed overhead smash (sledgehammer): the head goes up and *behind* the
+  // shoulder, then everything drives straight down. Slower than the axe chop, and
+  // the follow-through sits much lower, because a hammer does not stop at the ribcage.
+  smash: Object.freeze({
+    windup: { sy: -0.5, sp: 0.62, sr: 0.72, el: 1.05, wy: -0.85, wp: -0.35, wr: -1.0, rx: 0.02, ry: 0.04, rz: 0.0 },
+    impact: { sy: 0.22, sp: -0.2, sr: 0.3, el: 1.15, wy: 0.4, wp: -1.45, wr: 1.0, rx: -0.02, ry: -0.03, rz: -0.05 },
+    follow: { sy: 0.26, sp: -0.58, sr: 0.4, el: 1.05, wy: 0.5, wp: -1.3, wr: 1.0, rx: -0.04, ry: -0.06, rz: -0.08 },
   }),
 });
 
