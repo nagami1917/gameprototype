@@ -362,6 +362,7 @@ async function main() {
 
   /* ---------------- weapons ---------------- */
   const weapon = await import(pathToFileURL(path.join(JS_DIR, 'weapon.js')).href);
+  const enemyDefs = await import(pathToFileURL(path.join(JS_DIR, 'enemy.js')).href);
   console.log('\nWeapons');
 
   test('shotgun falloff: full damage at 7 m, 30% at 26 m, linear between', () => {
@@ -406,6 +407,97 @@ async function main() {
     assertEqual(weapon.WEAPON_DEFS.shotgun.pellets, 9, 'shotgun pellets');
     assert(weapon.WEAPON_DEFS.rifle.auto === true, 'rifle should be automatic');
     assert(weapon.WEAPON_DEFS.shotgun.auto === false, 'shotgun should not be automatic');
+  });
+
+  /* ---------------- weapon schema ---------------- */
+  console.log('\nWeapon schema');
+
+  test('every def in WEAPON_DEFS passes validateWeaponDef', () => {
+    const report = weapon.validateWeaponDefs();
+    assert(report.valid, `schema errors:\n       ${report.errors.join('\n       ')}`);
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      const own = weapon.validateWeaponDef(def);
+      assert(own.valid, `${id} must validate on its own: ${own.errors.join('; ')}`);
+      assertEqual(def.id, id, `${id} id must match its key`);
+    }
+  });
+
+  test('firearms declare ammo kinds, slot defaults and the reserved tuning fields', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      assert(weapon.AMMO_KINDS.includes(def.ammoKind) || def.category === 'melee',
+        `${id} needs an ammoKind from AMMO_KINDS`);
+      assert(def.unlockWave >= 1, `${id} unlockWave`);
+      assert(def.moveSpeedMult > 0, `${id} moveSpeedMult`);
+      if (def.category === 'firearm') assert(def.adsZoom > 0, `${id} adsZoom`);
+      else assertEqual(def.ammoKind, undefined, `${id} is melee and must not carry an ammo kind`);
+    }
+    assertEqual(weapon.WEAPON_DEFS.rifle.ammoKind, 'rifle', 'rifle ammo kind');
+    assertEqual(weapon.WEAPON_DEFS.shotgun.ammoKind, 'shell', 'shotgun ammo kind');
+  });
+
+  test('validateWeaponDef reports the broken field instead of throwing', () => {
+    const rifle = weapon.WEAPON_DEFS.rifle;
+    const knife = weapon.WEAPON_DEFS.knife;
+    const bad = (patch) => weapon.validateWeaponDef({ ...rifle, recoil: { ...rifle.recoil }, ...patch });
+    const badMelee = (patch) => weapon.validateWeaponDef({ ...knife, ...patch });
+
+    assert(bad({ damage: 0 }).errors.some((e) => e.includes('damage')), 'zero damage');
+    assert(bad({ damage: -5 }).errors.some((e) => e.includes('damage')), 'negative damage');
+    assert(bad({ startReserve: 10 }).errors.some((e) => e.includes('startReserve')), 'reserve under a magazine');
+    assert(bad({ reloadTime: 0 }).errors.some((e) => e.includes('reloadTime')), 'zero reload time');
+    assert(bad({ ammoKind: 'plasma' }).errors.some((e) => e.includes('ammoKind')), 'unknown ammo kind');
+    assert(bad({ magazineSize: 0 }).errors.some((e) => e.includes('magazineSize')), 'empty magazine');
+    assert(bad({ reach: 2 }).errors.some((e) => e.includes('reach')), 'firearm must not define melee fields');
+    assert(bad({ slot: 2 }).errors.some((e) => e.includes('shotgun')), 'slot clashes with the default loadout');
+    assert(bad({ slot: 4 }).errors.some((e) => e.includes('slot')), 'firearm in a melee slot');
+    assert(bad({ slot: 9 }).errors.some((e) => e.includes('slot')), 'slot out of range');
+    assert(bad({ headshotMultiplier: 1 }).errors.some((e) => e.includes('headshotMultiplier')), 'no headshot bonus');
+    assert(badMelee({ magazineSize: 8 }).errors.some((e) => e.includes('magazineSize')), 'melee must not define a magazine');
+    assert(badMelee({ attackCooldown: 0.1 }).errors.some((e) => e.includes('attackCooldown')), 'cooldown inside the swing');
+    assert(badMelee({ damage: 'lots' }).errors.some((e) => e.includes('damage')), 'damage must be a number');
+    assert(bad({ unlockWave: 0 }).errors.some((e) => e.includes('unlockWave')), 'unlockWave starts at 1');
+    assertEqual(bad({}).errors.length, 0, 'an untouched clone is still valid');
+  });
+
+  test('sustained DPS of every firearm sits inside the 60-160 band', () => {
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') {
+        assertEqual(weapon.sustainedDps(def), 0, `${id} is melee and has no dps`);
+        continue;
+      }
+      const dps = weapon.sustainedDps(def);
+      assert(dps >= 60 && dps <= 160, `${id}: ${dps.toFixed(1)} sustained dps is outside 60-160`);
+    }
+    // Reference points from the roadmap: the rifle is the yardstick at ~142 and
+    // the shotgun trades average dps for burst.
+    assertNear(weapon.sustainedDps(weapon.WEAPON_DEFS.rifle), 142, 1, 'rifle sustained dps');
+    const shotgun = weapon.WEAPON_DEFS.shotgun;
+    assertNear(weapon.sustainedDps(shotgun), 78, 1, 'shotgun sustained dps (whole tube reloaded)');
+    // The shotgun's burst is the exception the band ignores: a single shell
+    // carries more damage than any other weapon's shot.
+    const oneBlast = weapon.magazineDamage(shotgun) / shotgun.magazineSize;
+    for (const def of Object.values(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm' || def.id === 'shotgun') continue;
+      assert(oneBlast > def.damage * (def.pellets || 1), `shotgun blast should out-damage ${def.id}`);
+    }
+  });
+
+  test('no firearm body-shots an armored infected at wave-1 health', () => {
+    const armored = enemyDefs.ENEMY_TYPES.armored;
+    const wave1Health = wm.getWaveConfig(1).multipliers.health; // every later wave only adds health
+    const health = armored.maxHealth * wave1Health;
+    for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
+      if (def.category !== 'firearm') continue;
+      // Enemy.takeDamage() rounds per hit, so shotguns must be counted pellet
+      // by pellet - that is the worst case for the armour, and it still holds.
+      const perHit = Math.max(1, Math.round(def.damage * (1 - armored.armor)));
+      const triggerDamage = perHit * (def.pellets || 1);
+      assert(triggerDamage < health,
+        `${id}: one trigger pull deals ${triggerDamage} to armour, which one-shots ${health} hp`);
+    }
+    // Armour only ever reduces body shots, so headshots remain the answer.
+    const rifleHead = weapon.WEAPON_DEFS.rifle.damage * weapon.WEAPON_DEFS.rifle.headshotMultiplier;
+    assert(rifleHead > weapon.WEAPON_DEFS.rifle.damage, 'headshots ignore armour and must still beat a body shot');
   });
 
   test('melee attacks are unlimited, edge-triggered, and blocked by walls', () => {

@@ -13,6 +13,13 @@
  *
  * Nothing is removed "on click": a shot only damages an enemy whose
  * hitbox is actually under the (spread-jittered) crosshair ray.
+ *
+ * Every weapon is described by a plain data block in `WEAPON_DEFS`;
+ * `validateWeaponDef()` is the schema check the test suite runs over all of
+ * them, and the numbers it derives (`sustainedDps()`) are the balance
+ * guardrails. The five keys 1-5 are no longer hard-wired to weapon ids: they
+ * index `loadout`, an array of ids built by `sanitizeLoadout()` and persisted
+ * with the settings.
  */
 import * as THREE from 'three';
 import { raycastBoxes } from './collision.js';
@@ -25,7 +32,12 @@ export const WEAPON_DEFS = {
     id: 'rifle',
     category: 'firearm',
     name: 'MX-7 ASSAULT RIFLE',
-    slot: 1,
+    shortName: 'RIFLE',      // HUD slot label
+    slot: 1,                 // default slot; `loadout` may move it
+    ammoKind: 'rifle',       // which pickups refill it (see AMMO_PICKUP)
+    unlockWave: 1,           // earliest wave the loadout screen may offer it
+    moveSpeedMult: 1,        // hold-speed multiplier while it is drawn
+    adsZoom: 1.25,           // aimed FOV multiplier (reserved: not wired yet)
     damage: 24,
     headshotMultiplier: 2,
     fireRate: 9.5,          // shots per second
@@ -51,7 +63,12 @@ export const WEAPON_DEFS = {
     id: 'shotgun',
     category: 'firearm',
     name: 'HB-12 HELLBORE SHOTGUN',
+    shortName: 'SHOTGUN',
     slot: 2,
+    ammoKind: 'shell',
+    unlockWave: 1,
+    moveSpeedMult: 1,
+    adsZoom: 1,
     damage: 13,             // per pellet
     headshotMultiplier: 2,
     fireRate: 1.05,
@@ -77,7 +94,10 @@ export const WEAPON_DEFS = {
     id: 'knife',
     category: 'melee',
     name: 'FIELD KNIFE',
+    shortName: 'KNIFE',
     slot: 3,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 44,
     reach: 1.65,
     arcDegrees: 14,
@@ -99,7 +119,10 @@ export const WEAPON_DEFS = {
     id: 'pipe',
     category: 'melee',
     name: 'STEEL PIPE',
+    shortName: 'PIPE',
     slot: 4,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 52,
     reach: 1.9,
     arcDegrees: 42,
@@ -119,7 +142,10 @@ export const WEAPON_DEFS = {
     id: 'axe',
     category: 'melee',
     name: 'FIRE AXE',
+    shortName: 'AXE',
     slot: 5,
+    unlockWave: 1,
+    moveSpeedMult: 1,
     damage: 95,
     reach: 2.05,
     arcDegrees: 30,
@@ -140,8 +166,247 @@ export const WEAPON_DEFS = {
 /** Slot order is stable: rifle and shotgun keep their existing keys. */
 export const WEAPON_ORDER = ['rifle', 'shotgun', 'knife', 'pipe', 'axe'];
 
+/**
+ * Slots 1-5 are data now: keys 1-5 select `loadout[i]`, so a new weapon does
+ * not need a new key or a HUD edit. The default is today's fixed order.
+ */
+export const SLOT_COUNT = WEAPON_ORDER.length;
+
+/** Category each slot accepts; the loadout screen and sanitizeLoadout() share it. */
+export const SLOT_CATEGORIES = Object.freeze(['firearm', 'firearm', 'melee', 'melee', 'melee']);
+
+export const DEFAULT_LOADOUT = Object.freeze([...WEAPON_ORDER]);
+
 /** Firearms only; melee weapons never consume or receive ammunition. */
 export const AMMO_PICKUP = { rifle: 45, shotgun: 10 };
+
+/** Every weapon that can be picked in a loadout, in catalogue order. */
+export const WEAPON_IDS = Object.freeze(Object.keys(WEAPON_DEFS));
+
+/**
+ * True for a weapon id that exists and belongs in `category` (used to keep a
+ * firearm out of a melee slot and the other way round).
+ */
+function fitsSlot(id, category) {
+  const def = WEAPON_DEFS[id];
+  return !!def && (category ? def.category === category : true);
+}
+
+/**
+ * Coerces anything into a usable 5-slot loadout: unknown ids, duplicates,
+ * weapons in the wrong category and missing entries all fall back to `base`
+ * (or to the first legal weapon for that slot).
+ *
+ * @param {unknown} input    array of weapon ids, possibly short or bogus
+ * @param {string[]} [base]  loadout to fall back to, defaults to the standard one
+ * @returns {string[]}       a new array of exactly SLOT_COUNT valid ids
+ */
+export function sanitizeLoadout(input, base = DEFAULT_LOADOUT) {
+  const fallback = Array.isArray(base) && base.length === SLOT_COUNT ? base : DEFAULT_LOADOUT;
+  const used = new Set();
+  const out = [];
+  for (let i = 0; i < SLOT_COUNT; i++) {
+    const category = SLOT_CATEGORIES[i];
+    const wanted = Array.isArray(input) ? input[i] : null;
+    const pick = [wanted, fallback[i]]
+      .find((id) => fitsSlot(id, category) && !used.has(id))
+      ?? WEAPON_IDS.find((id) => WEAPON_DEFS[id].category === category && !used.has(id))
+      ?? fallback[i];
+    out.push(pick);
+    used.add(pick);
+  }
+  return out;
+}
+
+/** HUD labels for a loadout: `['1 RIFLE', '2 SHOTGUN', ...]`, key = index + 1. */
+export function hudSlotLabels(loadout = DEFAULT_LOADOUT) {
+  return loadout.map((id, i) => `${i + 1} ${WEAPON_DEFS[id]?.shortName ?? WEAPON_DEFS[id]?.name ?? id}`);
+}
+
+/**
+ * What the loadout screen may offer per slot: one entry per key, with the legal
+ * weapons for that category. Built from WEAPON_DEFS so a new gun only needs a
+ * def to appear in the menu.
+ */
+export function loadoutSlotOptions() {
+  return SLOT_CATEGORIES.map((category, index) => ({
+    index,
+    category,
+    name: `SLOT ${index + 1} - ${category === 'firearm' ? 'FIREARM' : 'MELEE'}`,
+    options: WEAPON_IDS.filter((id) => WEAPON_DEFS[id].category === category)
+      .map((id) => ({ id, name: WEAPON_DEFS[id].name, unlockWave: WEAPON_DEFS[id].unlockWave })),
+  }));
+}
+
+/* ------------------------------------------------------------------ *
+ * Schema + balance helpers (pure: no three.js, no game state)
+ * ------------------------------------------------------------------ */
+
+/** Fields every def must provide, per category, by type. */
+const REQUIRED_FIELDS = {
+  firearm: {
+    number: ['damage', 'headshotMultiplier', 'fireRate', 'magazineSize', 'startReserve', 'maxReserve',
+      'reloadTime', 'switchTime', 'pellets', 'spread', 'range', 'bloomPerShot', 'maxBloom', 'bloomDecay',
+      'unlockWave', 'moveSpeedMult', 'adsZoom'],
+    string: ['name', 'shortName', 'ammoKind', 'reloadMode', 'sound'],
+    boolean: ['auto'],
+    object: ['recoil'],
+  },
+  melee: {
+    number: ['damage', 'reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
+      'attackCooldown', 'switchTime', 'unlockWave', 'moveSpeedMult'],
+    string: ['name', 'shortName', 'swing'],
+    boolean: [],
+    object: [],
+  },
+};
+
+/** Fields that only make sense for one category and must be absent from the other. */
+const CATEGORY_ONLY_FIELDS = {
+  firearm: ['magazineSize', 'startReserve', 'maxReserve', 'reloadTime', 'reloadMode', 'ammoKind',
+    'auto', 'pellets', 'spread', 'bloomPerShot', 'maxBloom', 'bloomDecay', 'recoil', 'falloff',
+    'headshotMultiplier', 'penetration', 'adsZoom', 'tracer', 'sound'],
+  melee: ['reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
+    'swing', 'windup', 'strikeEnd', 'activeTime', 'trailColor'],
+};
+
+export const AMMO_KINDS = Object.freeze(['rifle', 'shell', 'heavy', 'explosive']);
+
+/**
+ * Checks one weapon def against the schema. Pure, so the test suite can run it
+ * over every def (and over deliberately broken ones) without a browser.
+ *
+ * Cross-def rules (slot uniqueness) need the whole table: they compare `def`
+ * with the other weapons that share the *default* loadout, because a loadout
+ * holds exactly one weapon per key while two weapons may declare the same
+ * preferred slot (the S-9 and the MX-7 both default to slot 1).
+ *
+ * @param {object} def                 weapon definition
+ * @param {object} [allDefs]           whole table, defaults to WEAPON_DEFS
+ * @param {string[]} [loadout]         default loadout, defaults to DEFAULT_LOADOUT
+ * @returns {{valid: boolean, errors: string[]}}
+ */
+export function validateWeaponDef(def, allDefs = WEAPON_DEFS, loadout = DEFAULT_LOADOUT) {
+  const errors = [];
+  const fail = (msg) => errors.push(msg);
+  if (!def || typeof def !== 'object') return { valid: false, errors: ['def must be an object'] };
+
+  const id = def.id;
+  if (typeof id !== 'string' || id.length === 0) fail('id must be a non-empty string');
+  const category = def.category;
+  if (category !== 'firearm' && category !== 'melee') {
+    fail(`category must be 'firearm' or 'melee' (got ${String(category)})`);
+    return { valid: false, errors };
+  }
+
+  const schema = REQUIRED_FIELDS[category];
+  for (const field of schema.number) {
+    const value = def[field];
+    if (typeof value !== 'number' || !Number.isFinite(value)) fail(`${field} must be a finite number`);
+  }
+  for (const field of schema.string) {
+    if (typeof def[field] !== 'string' || def[field].length === 0) fail(`${field} must be a non-empty string`);
+  }
+  for (const field of schema.boolean) {
+    if (typeof def[field] !== 'boolean') fail(`${field} must be a boolean`);
+  }
+  for (const field of schema.object) {
+    if (!def[field] || typeof def[field] !== 'object') fail(`${field} must be an object`);
+  }
+
+  // Positive-value rules.
+  if (!(def.damage > 0)) fail('damage must be greater than 0');
+  if (!(def.switchTime > 0)) fail('switchTime must be greater than 0');
+  if (def.unlockWave < 1) fail('unlockWave must be at least 1');
+  if (!(def.moveSpeedMult > 0)) fail('moveSpeedMult must be greater than 0');
+
+  if (category === 'firearm') {
+    if (!(def.reloadTime > 0)) fail('reloadTime must be greater than 0');
+    if (!(def.fireRate > 0)) fail('fireRate must be greater than 0');
+    if (!(def.magazineSize >= 1)) fail('magazineSize must be at least 1');
+    if (!(def.startReserve >= def.magazineSize)) fail('startReserve must be >= magazineSize');
+    if (!(def.maxReserve >= def.startReserve)) fail('maxReserve must be >= startReserve');
+    if (!(def.pellets >= 1)) fail('pellets must be at least 1');
+    if (!(def.spread >= 0) || !(def.spread < Math.PI / 2)) fail('spread must be a small non-negative angle');
+    if (!(def.range > 0)) fail('range must be greater than 0');
+    if (!AMMO_KINDS.includes(def.ammoKind)) fail(`ammoKind must be one of ${AMMO_KINDS.join(', ')}`);
+    if (def.reloadMode !== 'magazine' && def.reloadMode !== 'shell') fail("reloadMode must be 'magazine' or 'shell'");
+    if (!(def.headshotMultiplier > 1)) fail('headshotMultiplier must be greater than 1');
+    if (def.penetration !== undefined && !(Number.isInteger(def.penetration) && def.penetration >= 0)) {
+      fail('penetration must be a non-negative integer when present');
+    }
+    if (def.falloff) {
+      if (!(def.falloff.start >= 0 && def.falloff.end > def.falloff.start)) fail('falloff end must be past its start');
+      if (!(def.falloff.min > 0 && def.falloff.min <= 1)) fail('falloff min must be in (0, 1]');
+    }
+  } else {
+    if (!(def.hitTime >= 0 && def.hitTime < def.attackDuration)) fail('hitTime must be inside the attack');
+    if (!(def.attackCooldown >= def.attackDuration)) fail('attackCooldown must outlast attackDuration');
+    if (!(def.reach > 0 && def.arcDegrees > 0)) fail('reach and arcDegrees must be greater than 0');
+    if (!(def.rayCount >= 1 && def.maxTargets >= 1)) fail('rayCount and maxTargets must be at least 1');
+  }
+
+  // A def may not mix firearm and melee fields: that is how "melee has no ammo"
+  // and "a firearm has no reach" stay true without special cases elsewhere.
+  for (const field of CATEGORY_ONLY_FIELDS[category === 'firearm' ? 'melee' : 'firearm']) {
+    if (def[field] !== undefined) fail(`${category} defs must not define ${field}`);
+  }
+
+  // Slot sanity + uniqueness inside the default loadout.
+  if (!Number.isInteger(def.slot) || def.slot < 1 || def.slot > SLOT_COUNT) {
+    fail(`slot must be an integer in 1..${SLOT_COUNT}`);
+  } else if (SLOT_CATEGORIES[def.slot - 1] !== category) {
+    fail(`slot ${def.slot} is a ${SLOT_CATEGORIES[def.slot - 1]} slot, not ${category}`);
+  } else if (loadout.includes(id)) {
+    for (const otherId of loadout) {
+      if (otherId === id) continue;
+      const other = allDefs[otherId];
+      if (other && other.slot === def.slot) fail(`slot ${def.slot} is already used by ${otherId} in the default loadout`);
+    }
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Validates the whole table (ids matching their keys) and returns a report.
+ * @returns {{valid: boolean, errors: string[]}} errors are prefixed with the weapon id
+ */
+export function validateWeaponDefs(allDefs = WEAPON_DEFS, loadout = DEFAULT_LOADOUT) {
+  const errors = [];
+  for (const [key, def] of Object.entries(allDefs)) {
+    if (def.id !== key) errors.push(`${key}: id does not match its key (${String(def.id)})`);
+    for (const error of validateWeaponDef(def, allDefs, loadout).errors) errors.push(`${key}: ${error}`);
+  }
+  return { valid: errors.length === 0, errors };
+}
+
+/**
+ * Seconds to empty a full magazine and load the next one.
+ * Shell reloads insert one round at a time, so the whole tube takes
+ * `reloadTime * magazineSize`; magazine reloads are a single `reloadTime`.
+ */
+export function magazineCycleTime(def) {
+  if (def.category !== 'firearm') return 0;
+  const emptyTime = def.magazineSize / def.fireRate;
+  const reload = def.reloadMode === 'shell' ? def.reloadTime * def.magazineSize : def.reloadTime;
+  return emptyTime + reload;
+}
+
+/** Damage a full magazine can deal to one body, ignoring falloff and headshots. */
+export function magazineDamage(def) {
+  return def.category === 'firearm' ? def.damage * def.pellets * def.magazineSize : 0;
+}
+
+/**
+ * Sustained damage per second: a full magazine (all pellets on one body) over
+ * the time it takes to empty it and reload. This is the number the balance
+ * test bands; shotguns beat it in the first second of a fight, which is the
+ * whole point of a shotgun.
+ */
+export function sustainedDps(def) {
+  const cycle = magazineCycleTime(def);
+  return cycle > 0 ? magazineDamage(def) / cycle : 0;
+}
 
 /** Per-weapon ammo state. */
 class WeaponState {
