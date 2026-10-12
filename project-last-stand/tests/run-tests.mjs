@@ -663,6 +663,146 @@ async function main() {
     });
   });
 
+  /* ---------------- decals ---------------- */
+  const effects = await import(pathToFileURL(path.join(JS_DIR, 'effects.js')).href);
+  const { DecalPool, HOLE_LIFETIME, BLOOD_DECAL_LIFETIME, DECAL_FADE_TIME } = effects;
+  console.log('\nDecals');
+
+  // A stub scene is enough: the pool only needs add()/remove(), no WebGL context.
+  const decalScene = { add() {}, remove() {} };
+  const makePool = (count = 4, lifetime = HOLE_LIFETIME) =>
+    new DecalPool(decalScene, count, new THREE.MeshBasicMaterial(), 1, lifetime);
+  const UP = { x: 0, y: 1, z: 0 };
+
+  const _m = new THREE.Matrix4();
+  /**
+   * Instance scale of a slot (0 means the decal is not drawn). Read straight
+   * off the matrix basis: Matrix4.decompose() reports 1,1,1 for a degenerate
+   * (zero-scale) matrix in three r186.
+   */
+  const scaleOf = (pool, i) => {
+    pool.mesh.getMatrixAt(i, _m);
+    const e = _m.elements;
+    return Math.hypot(e[0], e[1], e[2]);
+  };
+
+  test('decals expire after their lifetime and free the slot', () => {
+    const pool = makePool();
+    try {
+      for (let i = 0; i < 3; i++) pool.place({ x: i, y: 0, z: 0 }, UP, 1, 0);
+      assertEqual(pool.activeCount, 3, 'three live decals');
+      pool.update(HOLE_LIFETIME - 1, null);
+      assertEqual(pool.activeCount, 3, 'still alive one second before expiry');
+      pool.update(1.1, null);
+      assertEqual(pool.activeCount, 0, 'all decals expired');
+      for (let i = 0; i < 3; i++) assertEqual(scaleOf(pool, i), 0, `slot ${i} should be hidden`);
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('decals fade out by shrinking over the fade tail', () => {
+    const pool = makePool();
+    try {
+      pool.place({ x: 0, y: 0, z: 0 }, UP, 2, 0);
+      pool.update(HOLE_LIFETIME - DECAL_FADE_TIME * 0.5, null);
+      assertNear(scaleOf(pool, 0), 1, 1e-3, 'halfway through the fade tail, scale is half');
+      assert(scaleOf(pool, 0) > 0, 'still visible while fading');
+      pool.update(DECAL_FADE_TIME, null);
+      assertEqual(pool.activeCount, 0, 'gone once the tail is over');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('recycling takes expired slots before the newest marks', () => {
+    const pool = makePool(4);
+    try {
+      pool.place({ x: 0, y: 0, z: 0 }, UP, 1, 0);
+      pool.place({ x: 1, y: 0, z: 0 }, UP, 1, 0);
+      pool.update(HOLE_LIFETIME * 0.5, null); // age the first two
+      pool.place({ x: 2, y: 0, z: 0 }, UP, 1, 0);
+      pool.place({ x: 3, y: 0, z: 0 }, UP, 1, 0); // pool is now full
+      pool.update(HOLE_LIFETIME * 0.5 + 0.1, null); // only the first two expire
+      assertEqual(pool.activeCount, 2, 'the two older marks expired');
+      // The free-list is a stack, so the two released slots can come back in
+      // any order - what matters is that they are the expired ones.
+      const reused = [pool.place({ x: 4, y: 0, z: 0 }, UP, 1, 0), pool.place({ x: 5, y: 0, z: 0 }, UP, 1, 0)];
+      assert(reused.includes(0) && reused.includes(1), `expected the expired slots 0 and 1, got ${reused}`);
+      assertEqual(pool.activeCount, 4, 'the recent marks (slots 2 and 3) were kept');
+      assert(pool.alive[2] && pool.alive[3], 'slots 2 and 3 still hold the newest marks');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('marks on a door vanish when the panel moves and return when it closes', () => {
+    const pool = makePool(4);
+    const door = { openAmount: 0 };
+    try {
+      pool.place({ x: 0, y: 1, z: 0 }, { x: 0, y: 0, z: 1 }, 1, 0, door);
+      pool.update(0.016, [door]);
+      assert(scaleOf(pool, 0) > 0, 'closed door keeps its marks');
+
+      door.openAmount = 0.5;
+      pool.update(0.016, [door]);
+      assertEqual(scaleOf(pool, 0), 0, 'mark is culled as soon as the panel moves');
+
+      // Repeatable: close it, the panel is back where it was, so is the mark.
+      door.openAmount = 0;
+      pool.update(0.016, [door]);
+      assert(scaleOf(pool, 0) > 0, 'mark is restored when the door closes');
+
+      door.openAmount = 1;
+      pool.update(0.016, [door]);
+      assertEqual(scaleOf(pool, 0), 0, 'mark is culled again on the next open');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('marks without an owner ignore door movement', () => {
+    const pool = makePool(4);
+    const door = { openAmount: 1 };
+    try {
+      pool.place({ x: 0, y: 0, z: 0 }, UP, 1, 0);                    // floor blood
+      pool.place({ x: 2, y: 1, z: 0 }, { x: -1, y: 0, z: 0 }, 1, 0); // wall
+      pool.update(0.016, [door]);
+      assert(scaleOf(pool, 0) > 0, 'floor marks are untouched by doors');
+      assert(scaleOf(pool, 1) > 0, 'wall marks are untouched by doors');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('clear() releases every slot and resets the pool', () => {
+    const pool = makePool(4);
+    try {
+      pool.place({ x: 0, y: 0, z: 0 }, UP, 1, 0);
+      pool.place({ x: 1, y: 0, z: 0 }, UP, 1, 0);
+      pool.clear();
+      assertEqual(pool.activeCount, 0, 'no live decals after a clear');
+      for (let i = 0; i < pool.count; i++) assertEqual(scaleOf(pool, i), 0, `slot ${i} hidden`);
+      assertEqual(pool.place({ x: 0, y: 0, z: 0 }, UP, 1, 0), 0, 'the pool starts from slot 0 again');
+      pool.update(HOLE_LIFETIME + 1, null);
+      assertEqual(pool.activeCount, 0, 'lifetimes were reset, so the fresh mark still expires');
+    } finally {
+      pool.dispose();
+    }
+  });
+
+  test('blood pools outlive bullet holes', () => {
+    assert(BLOOD_DECAL_LIFETIME > HOLE_LIFETIME, 'blood pools should last longer than bullet holes');
+    const pool = makePool(4, BLOOD_DECAL_LIFETIME);
+    try {
+      pool.place({ x: 0, y: 0, z: 0 }, UP, 1, 0);
+      pool.update(HOLE_LIFETIME + 1, null);
+      assertEqual(pool.activeCount, 1, 'pool uses its own lifetime');
+    } finally {
+      pool.dispose();
+    }
+  });
+
   /* ---------------- storage ---------------- */
   const storage = await import(pathToFileURL(path.join(JS_DIR, 'storage.js')).href);
   console.log('\nStorage');

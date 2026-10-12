@@ -177,46 +177,228 @@ const _decalM = new THREE.Matrix4();
 const _decalHidden = new THREE.Matrix4().makeScale(0, 0, 0);
 
 /**
+ * Decal lifetime tunables (seconds).
+ * Marks fade out by shrinking to zero scale over the last `DECAL_FADE_TIME`
+ * seconds: `MeshBasicMaterial` has no per-instance alpha, and scaling keeps
+ * the pool at one draw call with no shader patching.
+ */
+export const HOLE_LIFETIME = 12;
+export const BLOOD_DECAL_LIFETIME = 30;
+export const DECAL_FADE_TIME = 0.4;
+/**
+ * How far a door has to slide before its marks are culled. Deliberately tiny:
+ * the panel starts retracting into the ceiling the moment it moves, so a mark
+ * left behind would hang in the open doorway.
+ */
+export const DOOR_CULL_THRESHOLD = 0.02;
+
+/**
  * Recycled decals placed on surfaces (bullet holes, blood pools).
  * All decals of one pool are a single InstancedMesh, so the pool costs one
  * draw call instead of one per decal. Unused slots get a zero-scale matrix.
+ *
+ * Every slot carries its own lifetime and, optionally, the surface that owns
+ * it (`owner`, e.g. a sliding door). A mark dies with the surface it was
+ * placed on and expires on its own after `lifetime` seconds.
  */
-class DecalPool {
-  constructor(scene, count, material, size) {
+export class DecalPool {
+  constructor(scene, count, material, size, lifetime = HOLE_LIFETIME) {
     this.scene = scene;
     this.count = count;
+    this.lifetime = lifetime;
     this.cursor = 0;
+    this.dirty = false;
     const geo = new THREE.PlaneGeometry(size, size);
     this.mesh = new THREE.InstancedMesh(geo, material, count);
     this.mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.mesh.renderOrder = 2;
     // Instances are spread over the level, so the mesh's own bounds are not meaningful.
     this.mesh.frustumCulled = false;
+
+    // Per-slot state lives in parallel typed arrays: no per-decal objects and
+    // nothing is allocated while the game is running.
+    this.px = new Float32Array(count);
+    this.py = new Float32Array(count);
+    this.pz = new Float32Array(count);
+    this.qx = new Float32Array(count);
+    this.qy = new Float32Array(count);
+    this.qz = new Float32Array(count);
+    this.qw = new Float32Array(count);
+    this.baseScale = new Float32Array(count);
+    this.life = new Float32Array(count);
+    this.maxLife = new Float32Array(count);
+    this.alive = new Uint8Array(count);
+    this.hidden = new Uint8Array(count); // owned by a surface that is moving away
+    this.fading = new Uint8Array(count); // currently inside the fade tail
+    this.owner = new Array(count).fill(null);
+    // Free-list stack: slots whose decal expired (or was never used), so a new
+    // mark never pops one that was placed this second while others are free.
+    this.freeSlots = new Int32Array(count);
+    this.freeCount = 0;
+
     for (let i = 0; i < count; i++) this.mesh.setMatrixAt(i, _decalHidden);
+    this.resetSlots();
     scene.add(this.mesh);
     this.geo = geo;
   }
 
-  /** Places a decal at `point` facing `normal`. */
-  place(point, normal, scale = 1, rotation = 0) {
-    const i = this.cursor;
-    this.cursor = (this.cursor + 1) % this.count;
+  /** Number of slots currently showing a decal. */
+  get activeCount() {
+    let n = 0;
+    for (let i = 0; i < this.count; i++) if (this.alive[i]) n++;
+    return n;
+  }
+
+  /**
+   * Places a decal at `point` facing `normal`.
+   * @param {{x:number,y:number,z:number}} point
+   * @param {{x:number,y:number,z:number}} normal
+   * @param {number} [scale]
+   * @param {number} [rotation] spin around the surface normal, in radians
+   * @param {{openAmount:number}|null} [owner] surface that owns this mark
+   *        (a door); the decal is hidden as soon as that surface moves.
+   */
+  place(point, normal, scale = 1, rotation = 0, owner = null) {
+    let i;
+    if (this.freeCount > 0) {
+      i = this.freeSlots[--this.freeCount];
+    } else {
+      // Pool is full: recycle in placement order, which is also expiry order.
+      i = this.cursor;
+      this.cursor = (this.cursor + 1) % this.count;
+    }
     _decalN.set(normal.x, normal.y, normal.z);
     _decalQ.setFromUnitVectors(_decalZ, _decalN);
     _decalSpin.setFromAxisAngle(_decalZ, rotation);
     _decalQ.multiply(_decalSpin); // same as mesh.rotateZ(rotation) after setting the quaternion
-    _decalP.set(point.x + normal.x * 0.01, point.y + normal.y * 0.01, point.z + normal.z * 0.01);
+    // Nudge off the surface so the plane does not z-fight with it.
+    this.px[i] = point.x + normal.x * 0.01;
+    this.py[i] = point.y + normal.y * 0.01;
+    this.pz[i] = point.z + normal.z * 0.01;
+    this.qx[i] = _decalQ.x;
+    this.qy[i] = _decalQ.y;
+    this.qz[i] = _decalQ.z;
+    this.qw[i] = _decalQ.w;
+    this.baseScale[i] = scale;
+    this.life[i] = this.lifetime;
+    this.maxLife[i] = this.lifetime;
+    this.alive[i] = 1;
+    this.hidden[i] = 0;
+    this.fading[i] = 0;
+    this.owner[i] = owner || null;
+    this.writeMatrix(i, 1);
+    this.dirty = true;
+    return i;
+  }
+
+  /**
+   * Ages every live decal, fades it out at the end of its life and hides the
+   * marks whose owning surface is moving away (a door panel retracting into
+   * the ceiling). Hidden marks come back if the surface returns.
+   * @param {number} dt seconds
+   * @param {Array<{openAmount:number}>} [owners] surfaces that can own decals
+   */
+  update(dt, owners) {
+    const cull = owners && owners.length > 0;
+    for (let i = 0; i < this.count; i++) {
+      if (!this.alive[i]) continue;
+      const owner = this.owner[i];
+      if (!cull || !owner) continue;
+      // Repeatable: culling is re-evaluated every frame, so a mark placed while
+      // the door was closing is hidden again the next time it opens.
+      const hide = owner.openAmount > DOOR_CULL_THRESHOLD ? 1 : 0;
+      if (hide !== this.hidden[i]) {
+        this.hidden[i] = hide;
+        this.writeMatrix(i, hide ? 0 : this.fadeScale(i));
+        this.dirty = true;
+      }
+    }
+
+    for (let i = 0; i < this.count; i++) {
+      if (!this.alive[i]) continue;
+      this.life[i] -= dt;
+      if (this.life[i] <= 0) {
+        this.release(i);
+        this.dirty = true;
+        continue;
+      }
+      if (this.hidden[i]) continue; // owner keeps it invisible; life still ticks
+      const fade = this.fadeScale(i);
+      if (fade < 1) {
+        this.fading[i] = 1;
+        this.writeMatrix(i, fade);
+        this.dirty = true;
+      } else if (this.fading[i]) {
+        // Just came out of the fade tail (only happens for restored door marks).
+        this.fading[i] = 0;
+        this.writeMatrix(i, 1);
+        this.dirty = true;
+      }
+    }
+
+    // One upload per frame for the whole pool, not one per touched decal.
+    if (this.dirty) {
+      this.mesh.instanceMatrix.needsUpdate = true;
+      this.dirty = false;
+    }
+  }
+
+  /** Scale multiplier for the fade tail (1 while the decal is fresh). */
+  fadeScale(i) {
+    if (this.life[i] >= DECAL_FADE_TIME) return 1;
+    const t = this.life[i] / DECAL_FADE_TIME;
+    return t > 0 ? t : 0;
+  }
+
+  /** Composes and uploads the instance matrix for one slot. */
+  writeMatrix(i, fade = 1) {
+    const scale = this.baseScale[i] * fade;
+    if (!this.alive[i] || this.hidden[i] || scale <= 0) {
+      this.mesh.setMatrixAt(i, _decalHidden);
+      return;
+    }
+    _decalP.set(this.px[i], this.py[i], this.pz[i]);
+    _decalQ.set(this.qx[i], this.qy[i], this.qz[i], this.qw[i]);
     _decalS.setScalar(scale);
     _decalM.compose(_decalP, _decalQ, _decalS);
     this.mesh.setMatrixAt(i, _decalM);
-    this.mesh.instanceMatrix.needsUpdate = true;
+  }
+
+  /** Frees a slot: hides it and pushes it back on the free-list. */
+  release(i) {
+    this.alive[i] = 0;
+    this.hidden[i] = 0;
+    this.fading[i] = 0;
+    this.life[i] = 0;
+    this.owner[i] = null;
+    this.mesh.setMatrixAt(i, _decalHidden);
+    // Safe: a live slot is never in the free-list, and the list is rebuilt by clear().
+    this.freeSlots[this.freeCount++] = i;
+  }
+
+  /** Marks every slot free again (used when a run starts or ends). */
+  resetSlots() {
+    // Filled in reverse so slots hand out in ascending order, matching the
+    // ring cursor: slot 0 is always the oldest live decal.
+    for (let i = 0; i < this.count; i++) this.freeSlots[i] = this.count - 1 - i;
+    this.freeCount = this.count;
+    this.cursor = 0;
   }
 
   /** Hides every decal (used when a run ends). */
   clear() {
-    for (let i = 0; i < this.count; i++) this.mesh.setMatrixAt(i, _decalHidden);
+    for (let i = 0; i < this.count; i++) {
+      this.mesh.setMatrixAt(i, _decalHidden);
+      this.alive[i] = 0;
+      this.hidden[i] = 0;
+      this.fading[i] = 0;
+      this.life[i] = 0;
+      this.maxLife[i] = 0;
+      this.owner[i] = null;
+    }
+    this.resetSlots();
     this.mesh.instanceMatrix.needsUpdate = true;
-    this.cursor = 0;
+    this.dirty = false;
   }
 
   dispose() {
@@ -323,8 +505,12 @@ export class EffectsManager {
     this.bloodDecals.place({ x, y: 0, z }, { x: 0, y: 1, z: 0 }, 1.1 + Math.random() * 0.7, Math.random() * 6.28);
   }
 
-  /** Impact sparks/dust + bullet hole for a world surface. */
-  spawnImpact(point, normal, surface = 'concrete') {
+  /**
+   * Impact sparks/dust + bullet hole for a world surface.
+   * @param {{openAmount:number}|null} [owner] moving surface the mark sits on
+   *        (a door panel): the mark is hidden as soon as that surface moves.
+   */
+  spawnImpact(point, normal, surface = 'concrete', owner = null) {
     const isMetal = surface === 'metal' || surface === 'floor';
     const n = isMetal ? 6 : 4;
     for (let i = 0; i < n; i++) {
@@ -357,17 +543,26 @@ export class EffectsManager {
     t.life = 0.07;
   }
 
-  /** Removes all bullet holes and blood pools. */
+  /** Removes all bullet holes and blood pools and resets their lifetimes. */
   clearDecals() {
     this.holes.clear();
     this.bloodDecals.clear();
   }
 
-  /** Per-frame update of particles, decals fading, tracers and motes. */
-  update(dt, time = 0) {
+  /**
+   * Per-frame update of particles, decals fading, tracers and motes.
+   * @param {number} dt seconds
+   * @param {number} [time] elapsed run time, used by the ambient motes
+   * @param {Array<{openAmount:number}>} [doors] surfaces that own decals
+   */
+  update(dt, time = 0, doors = null) {
     this.blood.update(dt);
     this.sparks.update(dt);
     this.dust.update(dt);
+
+    // Decals: expire on a timer and disappear with the surface they sit on.
+    this.holes.update(dt, doors);
+    this.bloodDecals.update(dt, doors);
 
     for (const t of this.tracers) {
       if (t.life <= 0) continue;

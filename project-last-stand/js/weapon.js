@@ -835,7 +835,7 @@ export class WeaponSystem {
         if (outcome?.killed) this.effects.spawnBlood(res.point, res.normal, 2);
       } else if (res.type === 'world') {
         if (impacts < 3) {
-          this.effects.spawnImpact(res.point, res.normal, res.surface);
+          this.effects.spawnImpact(res.point, res.normal, res.surface, res.owner);
           impacts++;
         }
       }
@@ -909,7 +909,8 @@ export class WeaponSystem {
 
     if (planeT < Infinity && planeT <= (worldHit ? worldHit.distance : Infinity)) {
       const point = new THREE.Vector3(origin.x + dir.x * planeT, origin.y + dir.y * planeT, origin.z + dir.z * planeT);
-      return { type: 'world', point, normal: planeNormal, distance: planeT, surface };
+      // Floor and ceiling never move, so these marks have no owner.
+      return { type: 'world', point, normal: planeNormal, distance: planeT, surface, owner: null };
     }
     if (worldHit) {
       const p = worldHit.point;
@@ -919,6 +920,9 @@ export class WeaponSystem {
         normal: worldHit.normal,
         distance: worldHit.distance,
         surface: worldHit.box.tag === 'wall' ? 'concrete' : 'metal',
+        // The surface that owns the mark (a door panel) so its decals can be
+        // culled the moment the surface slides away. Static boxes have none.
+        owner: worldHit.box.owner || null,
       };
     }
     return {
