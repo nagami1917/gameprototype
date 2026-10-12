@@ -993,6 +993,49 @@ async function main() {
     });
   });
 
+  test('a loadout change hides the weapons that left the kit: one gun on screen, always', () => {
+    withDocumentStub(() => {
+      const { camera, system } = makeWeaponSystem();
+      try {
+        // Every viewmodel is built once and shared, so the only thing that keeps
+        // the old kit off the screen is explicit hiding on every rebind.
+        const drawn = () => [...system.viewmodels.entries()]
+          .filter(([, m]) => m?.group.visible).map(([id]) => id);
+        assertEqual(drawn().join(','), 'rifle', 'slot 1 is the only gun drawn at the start');
+        assertEqual(system.viewmodels.get('rifle').group.parent, camera, 'the drawn gun hangs off the camera');
+
+        system.setLoadout(['launcher', 'shotgun', 'knife', 'pipe', 'axe']);
+        assertEqual(drawn().join(','), 'launcher', 'the rifle left the kit and must leave the screen');
+
+        system.setLoadout(['smg', 'dmr', 'axe', 'pipe', 'knife']);
+        assertEqual(drawn().join(','), 'smg', 'two swaps in a row still leave exactly one gun drawn');
+        for (const [id, model] of system.viewmodels) {
+          if (id === 'smg') continue;
+          assert(!model.group.visible, `${id} must not be visible after the swap`);
+          // Kept in the scene graph on purpose: prewarmShaders() compiles every
+          // viewmodel at startup, and three only compiles attached objects.
+          assert(model.group.parent !== null, `${id} must stay attached so its shader stays compiled`);
+        }
+
+        // A weapon that comes back into the kit is drawn again, and the gun it
+        // replaced goes away.
+        assertEqual(system.requestSwitch(2), true, 'switch to the axe');
+        assertEqual(drawn().join(','), 'axe', 'only the drawn melee weapon is visible');
+        assertEqual(system.models[2].group.parent, system.melee.socket, 'and it is on the hand socket');
+        assertEqual(system.viewmodels.get('smg').group.visible, false, 'the SMG is hidden while the axe is out');
+
+        // Menu / death hiding must survive a loadout change in either order.
+        system.setVisible(false);
+        system.setLoadout(weapon.DEFAULT_LOADOUT);
+        assertEqual(drawn().join(','), '', 'nothing is drawn while the viewmodel is hidden');
+        system.setVisible(true);
+        assertEqual(drawn().join(','), 'rifle', 'showing the viewmodel brings back only the drawn slot');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
   /* ---------------- new firearms ---------------- */
   console.log('\nNew firearms');
 

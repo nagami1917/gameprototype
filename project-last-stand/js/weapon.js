@@ -985,9 +985,24 @@ export class WeaponSystem {
     this.bindModels();
   }
 
-  /** Points the slot list at the viewmodels of the current loadout. */
+  /**
+   * Points the slot list at the viewmodels of the current loadout.
+   *
+   * Viewmodels are built once per WeaponSystem and shared by every loadout, so a
+   * gun that has just left the kit is still hanging off the camera and still
+   * flagged visible. `syncVisibility()` only walks the current slots, so the
+   * leavers are hidden here - otherwise the previous kit stays on screen behind
+   * the new one. They stay parented on purpose: `Game.prewarmShaders()` reveals
+   * and compiles every viewmodel at startup (three only compiles what is in the
+   * scene graph), which is what keeps a loadout change from compiling a shader
+   * mid-run.
+   */
   bindModels() {
     this.models = this.loadout.map((id) => this.viewmodels.get(id));
+    for (const [id, model] of this.viewmodels) {
+      if (!model || this.loadout.includes(id)) continue;
+      model.group.visible = false;
+    }
     this.models.forEach((_, i) => this.attachModel(i));
     this.syncVisibility();
   }
