@@ -105,6 +105,15 @@ Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
 - **Waves** grow in size and difficulty. Each wave is preceded by a countdown and is
   followed by a supply break where pickups respawn. Every fifth wave adds an elite
   armored group.
+- **Supply crates** carry a kind of ammunition, shown by the stripe and glow colour:
+  yellow is rifle rounds (MX-7, S-9, MKR-1), red is shells (HB-12), green is
+  explosive rounds (GL-6); blue heavy crates are reserved for a future weapon. At
+  every supply break each crate rolls its kind from the ammunition your kit uses:
+  every kind you carry appears at least once, the rest by rarity (rifle rounds are
+  common, explosive rounds are a find). A crate is only collected when a weapon of
+  its kind has room, and it refills every such weapon. The HUD prints the drawn
+  weapon's ammo kind next to its reserve in the matching colour, so you know which
+  crate to run for. The sidearm never takes crates.
 - **Score**: kills award points, headshots add a bonus, and each cleared wave gives a
   bonus. High score, best wave and best kills are saved in this browser's LocalStorage.
 - The game continues until your health reaches zero.

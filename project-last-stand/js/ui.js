@@ -30,7 +30,7 @@ export class UI {
   cacheElements() {
     const ids = [
       'hud', 'hud-wave', 'hud-remaining', 'hud-phase', 'hud-score', 'hud-kills',
-      'hud-health-text', 'hud-health-fill', 'hud-weapon', 'hud-ammo', 'hud-reserve', 'hud-status',
+      'hud-health-text', 'hud-health-fill', 'hud-weapon', 'hud-ammo', 'hud-reserve', 'hud-ammo-kind', 'hud-status',
       'hud-stamina-text', 'hud-stamina-bar', 'hud-stamina-fill', 'dash-effect',
       'crosshair', 'hitmarker', 'flash-damage', 'low-health', 'damage-indicator',
       'banner', 'banner-title', 'banner-sub', 'countdown', 'toasts',
@@ -343,7 +343,8 @@ export class UI {
 
   /**
    * @param {object} s  snapshot:
-   *   health, maxHealth, stamina, maxStamina, weapon {name, ammo, reserve, reloading, switching, slot},
+   *   health, maxHealth, stamina, maxStamina,
+   *   weapon {name, ammo, reserve, ammoKind, ammoKindLabel, reloading, switching, slot},
    *   kills, score, wave, remaining, phase ('countdown'|'active'|'intermission'|...), phaseText
    */
   updateHud(s) {
@@ -378,6 +379,13 @@ export class UI {
     if (w.hasAmmo) {
       this.diff('ammo', w.ammo, (v) => this.setText(this.el['hud-ammo'], String(v)));
       this.diff('reserve', w.reserve, (v) => this.setText(this.el['hud-reserve'], String(v)));
+      // The ammo kind the crates must carry for this gun, in the crate's colour.
+      this.diff('ammoKind', w.ammoKind ?? '', (v) => {
+        const el = this.el['hud-ammo-kind'];
+        if (!el) return;
+        this.setText(el, w.ammoKindLabel ?? '');
+        if (v) el.dataset.kind = v; else delete el.dataset.kind;
+      });
     }
     const status = w.switching
       ? 'DRAWING'

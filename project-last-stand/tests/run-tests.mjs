@@ -2343,12 +2343,14 @@ async function main() {
       system.states[5].reserve = 0; // a spent sidearm coming out of a wave
       const toasts = [];
       const events = [];
+      const restocks = [];
       // A bare Game: the real onWaveEvent() body with its DOM-facing collaborators
       // stubbed, so the wiring under test is the one the browser runs.
       const bareGame = Object.create(gameModule.Game.prototype);
       Object.assign(bareGame, {
         stats: { wave: 0, score: 0 },
-        level: { pickups: { setAllActive() {} } },
+        loadout: system.loadout,
+        level: { pickups: { ammoCount: 4, restock: (kinds) => restocks.push(kinds) } },
         ui: {
           setCountdown() {},
           showBanner() {},
@@ -2380,7 +2382,229 @@ async function main() {
         bareGame.onWaveEvent('waveCleared', { wave: 2, bonus: 600 });
         assert(!toasts.includes('SIDEARM RESTOCKED'), 'no refill, no toast');
         assert(toasts.includes('Supply crates restocked'), 'the crates still restock');
+        // Milestone 5: the same event rolls a kind for every crate, for this kit.
+        assertEqual(restocks.length, 2, 'one crate roll per intermission');
+        for (const kinds of restocks) {
+          assertEqual(kinds.length, 4, 'one kind per crate in the level');
+          assert(kinds.includes('rifle') && kinds.includes('shell'), 'both carried kinds are on the floor');
+          assert(kinds.every((k) => k === 'rifle' || k === 'shell'), 'and nothing the kit cannot use');
+        }
       } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  /* ---------------- milestone 5: ammo kinds + kind-aware crates ---------------- */
+  console.log('\nAmmo kinds');
+
+  test('every ammo kind has a label, a crate colour and a lottery weight; rifle is the common kind', () => {
+    for (const kind of weapon.AMMO_KINDS) {
+      const info = weapon.AMMO_KIND_INFO[kind];
+      assert(info, `${kind} has an AMMO_KIND_INFO row`);
+      assert(typeof info.label === 'string' && info.label.length > 0, `${kind} has a HUD label`);
+      assert(Number.isInteger(info.color) && Number.isInteger(info.glow), `${kind} has crate colours`);
+      assert(info.weight > 0, `${kind} can actually be rolled`);
+    }
+    for (const kind of Object.keys(weapon.AMMO_KIND_INFO)) {
+      assert(weapon.AMMO_KINDS.includes(kind), `${kind} is a schema kind, not a stray row`);
+    }
+    const w = (k) => weapon.AMMO_KIND_INFO[k].weight;
+    // Roadmap §5 acceptance for milestone 5: "LMG ammo is rarer than rifle ammo".
+    assert(w('rifle') > w('shell') && w('shell') > w('heavy') && w('heavy') > w('explosive'),
+      'rarity runs rifle > shell > heavy > explosive');
+    // No two kinds share a stripe colour, or a crate could not state its kind.
+    const colours = new Set(weapon.AMMO_KINDS.map((k) => weapon.AMMO_KIND_INFO[k].color));
+    assertEqual(colours.size, weapon.AMMO_KINDS.length, 'crate stripes are distinct per kind');
+  });
+
+  test('carriedAmmoKinds() lists what the crate-fed guns of a kit use, never the sidearm', () => {
+    assertEqual(weapon.carriedAmmoKinds(weapon.DEFAULT_LOADOUT).join(','), 'rifle,shell', 'default kit');
+    assertEqual(weapon.carriedAmmoKinds(['smg', 'dmr', 'knife', 'pipe', 'axe']).join(','), 'rifle',
+      'two rifle-ammo guns are one kind');
+    assertEqual(weapon.carriedAmmoKinds(['shotgun', 'launcher', 'knife', 'pipe', 'axe']).join(','), 'shell,explosive',
+      'in AMMO_KINDS order, whatever the key order');
+    assertEqual(weapon.carriedAmmoKinds(['launcher', 'shotgun', 'knife', 'pipe', 'axe']).join(','), 'shell,explosive',
+      'same kit, same answer');
+    // The pistol is in every kit (key 6) and nominally fires rifle rounds, but it
+    // never takes a crate, so it must not be the reason rifle crates appear.
+    assert(weapon.WEAPON_DEFS.pistol.ammoKind === 'rifle', 'precondition: sidearm nominal kind');
+    assertEqual(weapon.carriedAmmoKinds(['shotgun', 'launcher', 'knife', 'pipe', 'axe']).includes('rifle'), false,
+      'no rifle crates for a kit whose only rifle-ammo gun is the sidearm');
+  });
+
+  test('assignCrateKinds() covers every carried kind, rolls the rest by rarity and never rolls a useless crate', () => {
+    const rng = level.makeRng(5);
+    const four = weapon.assignCrateKinds(4, ['rifle', 'shell'], rng);
+    assertEqual(four.length, 4, 'one kind per crate');
+    assert(four.includes('rifle') && four.includes('shell'), 'both kinds are guaranteed with crates to spare');
+    assert(four.every((k) => k === 'rifle' || k === 'shell'), 'nothing the kit cannot use');
+    // One crate, two kinds: the rule degrades to "one of them", not to a crash.
+    const one = weapon.assignCrateKinds(1, ['shell', 'explosive'], rng);
+    assertEqual(one.length, 1, 'one crate');
+    assert(one[0] === 'shell' || one[0] === 'explosive', 'and it is a carried kind');
+    assertEqual(weapon.assignCrateKinds(0, ['rifle'], rng).length, 0, 'no crates, no kinds');
+    // Rarity: over many crates the common kind clearly outnumbers the rare one.
+    const many = weapon.assignCrateKinds(600, ['rifle', 'explosive'], level.makeRng(11));
+    const count = (k) => many.filter((x) => x === k).length;
+    assert(count('rifle') > count('explosive') * 3,
+      `rifle crates (${count('rifle')}) are much more common than explosive ones (${count('explosive')})`);
+    // Deterministic for a seed, so a run can be replayed.
+    assertEqual(weapon.assignCrateKinds(8, ['rifle', 'shell'], level.makeRng(99)).join(','),
+      weapon.assignCrateKinds(8, ['rifle', 'shell'], level.makeRng(99)).join(','), 'same seed, same crates');
+    // The guaranteed crates move around: not always the first spots.
+    const positions = new Set();
+    for (let seed = 1; seed <= 40; seed++) {
+      positions.add(weapon.assignCrateKinds(4, ['rifle', 'shell'], level.makeRng(seed)).indexOf('shell'));
+    }
+    assert(positions.size > 1, 'the shell crate is not pinned to one spot');
+    // Garbage in: unknown kinds are dropped, an empty list means rifle crates.
+    assertEqual(weapon.assignCrateKinds(3, ['plasma', 'shell'], rng).every((k) => k === 'shell'), true,
+      'unknown kinds are ignored');
+    assertEqual(weapon.assignCrateKinds(2, [], rng).join(','), 'rifle,rifle', 'empty list falls back to rifle crates');
+  });
+
+  test('needsAmmo(kind) / addAmmo(kind): a crate only feeds the carried guns of its kind, never the sidearm', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem(['rifle', 'shotgun', 'knife', 'pipe', 'axe']);
+      const rifle = system.states[0];
+      const shotgun = system.states[1];
+      const pistol = system.states[5];
+      assertEqual(pistol.def.id, 'pistol', 'precondition: the sidearm is on key 6');
+      try {
+        rifle.reserve = rifle.def.maxReserve;
+        shotgun.reserve = 0;
+        pistol.reserve = 0;
+        assertEqual(system.needsAmmo('rifle'), false, 'a dry shotgun does not make a rifle crate collectable');
+        assertEqual(system.needsAmmo('shell'), true, 'a shell crate is');
+        assertEqual(system.needsAmmo(), true, 'the untyped check still means "anything has room"');
+        assertEqual(system.needsAmmo('explosive'), false, 'a kind the kit does not carry is never wanted');
+        assertEqual(system.addAmmo('rifle'), false, 'a rifle crate gives a full rifle nothing');
+        assertEqual(shotgun.reserve, 0, 'and does not touch the shotgun');
+        assertEqual(pistol.reserve, 0, 'nor the dry sidearm - the intermission refill owns it');
+        assertEqual(system.addAmmo('shell'), true, 'a shell crate restocks the shotgun');
+        assertEqual(shotgun.reserve, weapon.AMMO_PICKUP.shotgun, 'by its AMMO_PICKUP amount');
+        assertEqual(rifle.reserve, rifle.def.maxReserve, 'and leaves the rifle alone');
+        assertEqual(pistol.reserve, 0, 'the sidearm still gets nothing from any crate');
+        assertEqual(system.needsAmmo('rifle'), false, 'a dry sidearm alone does not want a rifle crate');
+        const byKind = system.reservesByKind();
+        assertEqual(byKind.rifle, rifle.def.maxReserve, 'reserve per kind: rifle');
+        assertEqual(byKind.shell, weapon.AMMO_PICKUP.shotgun, 'reserve per kind: shell');
+        assertEqual(byKind.explosive, undefined, 'kinds the kit does not carry are absent');
+      } finally {
+        system.dispose();
+      }
+      // One crate, two guns of its kind: both are topped up.
+      const pair = makeWeaponSystem(['rifle', 'smg', 'knife', 'pipe', 'axe']).system;
+      try {
+        pair.states[0].reserve = 0;
+        pair.states[1].reserve = 0;
+        assertEqual(pair.addAmmo('rifle'), true, 'the rifle crate is accepted');
+        assertEqual(pair.states[0].reserve, weapon.AMMO_PICKUP.rifle, 'rifle +45');
+        assertEqual(pair.states[1].reserve, weapon.AMMO_PICKUP.smg, 'SMG +90 from the same crate');
+        assertEqual(pair.reservesByKind().rifle, weapon.AMMO_PICKUP.rifle + weapon.AMMO_PICKUP.smg,
+          'the kind read-out sums both pools');
+        const hud = pair.getHudData();
+        assertEqual(hud.ammoKind, 'rifle', 'the HUD knows which crate feeds the drawn gun');
+        assertEqual(hud.ammoKindLabel, 'RIFLE', 'with its label');
+        pair.requestSwitch(2);
+        assertEqual(pair.getHudData().ammoKind, null, 'melee has no kind');
+        assertEqual(pair.getHudData().ammoKindLabel, '', 'and prints no tag');
+      } finally {
+        pair.dispose();
+      }
+    });
+  });
+
+  test('PickupSystem crates carry a kind, show it, and hand it to the collect filter', () => {
+    const scene = new THREE.Scene();
+    const palette = weapon.AMMO_KIND_INFO;
+    const pickups = new level.PickupSystem(scene, [{ x: 0, z: 0 }], [{ x: 3, z: 0 }, { x: 6, z: 0 }, { x: 9, z: 0 }], null,
+      { ammoKinds: palette });
+    try {
+      assertEqual(pickups.ammoCount, 3, 'three crates');
+      assertEqual(pickups.ammoItems.every((item) => item.kind === 'rifle'), true, 'rifle until told otherwise');
+      pickups.restock(['shell', 'explosive', 'rifle']);
+      const crates = pickups.ammoItems;
+      assertEqual(crates.map((c) => c.kind).join(','), 'shell,explosive,rifle', 'kinds land in layout order');
+      // The crate states its kind: stripe and glow take the kind's colours.
+      assertEqual(crates[0].stripe.material.color.getHex(), palette.shell.color, 'shell stripe');
+      assertEqual(crates[0].glow.material.color.getHex(), palette.shell.glow, 'shell glow');
+      assertEqual(crates[1].stripe.material.color.getHex(), palette.explosive.color, 'explosive stripe');
+      assertEqual(crates[2].stripe.material.color.getHex(), palette.rifle.color, 'rifle stripe');
+      // Materials are shared per kind, not cloned per restock.
+      pickups.restock(['rifle', 'rifle', 'rifle']);
+      assert(crates[0].stripe.material === crates[2].stripe.material, 'one stripe material per kind');
+      assertEqual(crates[0].glow.material.color.getHex(), palette.rifle.glow, 'repainted to rifle');
+      pickups.restock(['shell', 'explosive', 'rifle']);
+      // The filter sees the kind, and a refusal leaves the crate on the floor.
+      const seen = [];
+      const refused = pickups.tryCollect(3, 0, 0.5, (type, kind) => { seen.push([type, kind]); return false; });
+      assertEqual(refused, null, 'refused crate is not collected');
+      assertEqual(seen[0][0], 'ammo', 'the filter was asked about a crate');
+      assertEqual(seen[0][1], 'shell', 'and told its kind');
+      assertEqual(crates[0].active, true, 'the crate stays');
+      const got = pickups.tryCollect(3, 0, 0.5, (type, kind) => kind === 'shell');
+      assert(got && got.kind === 'shell', 'accepted by kind');
+      assertEqual(crates[0].active, false, 'and taken');
+      const health = pickups.tryCollect(0, 0, 0.5, (type, kind) => { seen.push([type, kind]); return true; });
+      assertEqual(health.type, 'health', 'health packs still collect');
+      assertEqual(seen[seen.length - 1][1], null, 'a health pack has no kind');
+      // A short list repeats its last kind; an empty one changes nothing.
+      pickups.restock(['explosive']);
+      assertEqual(pickups.ammoItems.map((c) => c.kind).join(','), 'explosive,explosive,explosive', 'short list repeats');
+      assertEqual(crates[0].active, true, 'restock reactivates');
+      pickups.restock([]);
+      assertEqual(pickups.ammoItems.map((c) => c.kind).join(','), 'explosive,explosive,explosive', 'empty list keeps kinds');
+      // The level's own crates: a two-firearm kit carries at most two kinds, so
+      // with this many 'A' cells assignCrateKinds() guarantees each of them a crate.
+      assert(plan.ammoSpots.length >= 2, `the facility has crates for every kind (${plan.ammoSpots.length})`);
+    } finally {
+      pickups.dispose();
+    }
+  });
+
+  test('collecting a crate in Game refills only its kind and names it in the toast', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem(['rifle', 'shotgun', 'knife', 'pipe', 'axe']);
+      const toasts = [];
+      const picked = [];
+      const scene = new THREE.Scene();
+      const pickups = new level.PickupSystem(scene, [], [{ x: 0, z: 0 }, { x: 0, z: 8 }], null,
+        { ammoKinds: weapon.AMMO_KIND_INFO });
+      const bareGame = Object.create(gameModule.Game.prototype);
+      Object.assign(bareGame, {
+        loadout: system.loadout,
+        level: { pickups },
+        player: { position: { x: 0, z: 0 }, health: 100, maxHealth: 100 },
+        ui: { toast: (text) => toasts.push(text) },
+        audio: { playPickup: (type) => picked.push(type) },
+        weapons: system,
+      });
+      try {
+        pickups.restock(['rifle', 'shell']);
+        const rifle = system.states[0];
+        const shotgun = system.states[1];
+        rifle.reserve = rifle.def.maxReserve;
+        shotgun.reserve = 0;
+        // Standing on a rifle crate with a full rifle: it is not for us.
+        bareGame.updatePickups();
+        assertEqual(picked.length, 0, 'a full-rifle player walks over the rifle crate');
+        assertEqual(pickups.ammoItems[0].active, true, 'which stays for later');
+        // Step onto the shell crate.
+        bareGame.player.position = { x: 0, z: 8 };
+        bareGame.updatePickups();
+        assertEqual(picked.join(','), 'ammo', 'the shell crate is taken');
+        assertEqual(shotgun.reserve, weapon.AMMO_PICKUP.shotgun, 'shotgun restocked');
+        assertEqual(rifle.reserve, rifle.def.maxReserve, 'rifle untouched');
+        assertEqual(toasts[toasts.length - 1], 'SHELL AMMO RESTOCKED', 'the toast states the kind');
+        // restockSupplies() rolls kinds for the real kit and reactivates the crates.
+        bareGame.restockSupplies();
+        assertEqual(pickups.ammoItems.every((c) => c.active), true, 'both crates are back');
+        const kinds = pickups.ammoItems.map((c) => c.kind);
+        assert(kinds.includes('rifle') && kinds.includes('shell'), 'one crate per carried kind');
+      } finally {
+        pickups.dispose();
         system.dispose();
       }
     });
