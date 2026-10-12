@@ -53,12 +53,40 @@ export const SHOT_PROFILES = {
     ],
     body: { volume: 0.45, type: 'sine', f0: 120, f1: 36, decay: 0.26 },
   },
+  // GL-6 THUMPER: a hollow chunk (the round leaving the tube), not a crack. The
+  // bang itself is a separate sound, played where the round goes off.
+  launcher: {
+    noise: [
+      { volume: 0.6, filter: 'lowpass', freq: 900, q: 1.2, decay: 0.16, sweepTo: 320 },
+      { volume: 0.18, filter: 'highpass', freq: 2600, q: 0.6, decay: 0.02 },
+    ],
+    body: { volume: 0.4, type: 'triangle', f0: 150, f1: 52, decay: 0.18 },
+  },
 };
 
 /** Profile for a `def.sound`, falling back to the rifle. */
 export function shotProfile(kind) {
   return SHOT_PROFILES[kind] || SHOT_PROFILES.rifle;
 }
+
+/**
+ * Explosion table, the same shape as SHOT_PROFILES: noise layers plus body
+ * tones. Keyed by kind, so the frag grenade of roadmap §2.3 (or a molotov) is a
+ * row here, not a new branch in playExplosion().
+ */
+export const EXPLOSION_PROFILES = {
+  // Frag round: a low boom with a long tail and a short sharp crack on top.
+  frag: {
+    noise: [
+      { volume: 0.9, filter: 'lowpass', freq: 1900, q: 0.8, decay: 0.5, sweepTo: 180 },
+      { volume: 0.35, filter: 'highpass', freq: 2400, q: 0.6, decay: 0.07 },
+    ],
+    body: [
+      { volume: 0.6, type: 'sine', f0: 92, f1: 26, decay: 0.55 },
+      { volume: 0.22, type: 'sawtooth', f0: 190, f1: 42, decay: 0.2 },
+    ],
+  },
+};
 
 export class AudioManager {
   constructor({ volume = 0.8 } = {}) {
@@ -236,6 +264,16 @@ export class AudioManager {
     const profile = shotProfile(kind);
     for (const layer of profile.noise) this.burst(layer);
     if (profile.body) this.blip(profile.body);
+  }
+
+  /**
+   * The bang of an explosive round, played where it went off (positional).
+   * Table-driven like SHOT_PROFILES so a second explosive is a row, not a branch.
+   */
+  playExplosion(pos = null, kind = 'frag') {
+    const profile = EXPLOSION_PROFILES[kind] || EXPLOSION_PROFILES.frag;
+    for (const layer of profile.noise) this.burst({ pos, ...layer });
+    for (const layer of profile.body) this.blip({ pos, ...layer });
   }
 
   playDryFire() {

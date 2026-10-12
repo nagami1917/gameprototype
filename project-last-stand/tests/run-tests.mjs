@@ -585,6 +585,17 @@ async function main() {
     assertEqual(new Set(signatures).size, signatures.length, 'every gun must sound different');
   });
 
+  /**
+   * Splash weapons are exempt from the sustained-DPS band *by name*, the same way
+   * the shotgun is exempt from the burst comparison below.
+   *
+   * `sustainedDps()` assumes one trigger pull puts one bullet into one body. A
+   * GL-6 round is 140 damage on every enemy inside 4.5 m, so on paper it reads as
+   * ~36 dps while in practice it deletes a clump: the number is measuring the
+   * wrong thing for this weapon class (docs/Weapons_Roadmap.md §7).
+   */
+  const SPLASH_DPS_EXEMPT = new Set(['launcher']);
+
   test('sustained DPS of every firearm sits inside the 60-160 band', () => {
     for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
       if (def.category !== 'firearm') {
@@ -592,6 +603,12 @@ async function main() {
         continue;
       }
       const dps = weapon.sustainedDps(def);
+      if (SPLASH_DPS_EXEMPT.has(id)) {
+        // The exemption is deliberate, so it is pinned: the day a splash weapon
+        // climbs into the normal band it is no longer a burst weapon.
+        assert(dps < 60, `${id} is exempt from the dps band as a burst weapon, but sits at ${dps.toFixed(1)}`);
+        continue;
+      }
       assert(dps >= 60 && dps <= 160, `${id}: ${dps.toFixed(1)} sustained dps is outside 60-160`);
     }
     // Reference points from the roadmap: the rifle is the yardstick at ~142 and
@@ -600,12 +617,16 @@ async function main() {
     const shotgun = weapon.WEAPON_DEFS.shotgun;
     assertNear(weapon.sustainedDps(shotgun), 78, 1, 'shotgun sustained dps (whole tube reloaded)');
     // The shotgun's burst is the exception the band ignores: a single shell
-    // carries more damage than any other weapon's shot.
+    // carries more damage than any other weapon's shot. Splash weapons are out
+    // of the comparison for the same reason: one grenade is a 4.5 m explosion
+    // and is *meant* to out-damage a shell (the shell still beats every bullet).
     const oneBlast = weapon.magazineDamage(shotgun) / shotgun.magazineSize;
     for (const def of Object.values(weapon.WEAPON_DEFS)) {
-      if (def.category !== 'firearm' || def.id === 'shotgun') continue;
+      if (def.category !== 'firearm' || def.id === 'shotgun' || SPLASH_DPS_EXEMPT.has(def.id)) continue;
       assert(oneBlast > def.damage * (def.pellets || 1), `shotgun blast should out-damage ${def.id}`);
     }
+    assert(weapon.magazineDamage(weapon.WEAPON_DEFS.launcher) > oneBlast,
+      'a grenade round is the biggest single hit in the game');
   });
 
   test('no firearm body-shots an armored infected at wave-1 health', () => {
@@ -711,18 +732,41 @@ async function main() {
   const meleeAnim = await import(pathToFileURL(path.join(JS_DIR, 'meleeAnim.js')).href);
   console.log('\nMelee swing');
 
-  /** Runs `fn` with a minimal document stub (the viewmodels create small canvases). */
+  /**
+   * A fake 2D context: every draw call is a no-op and gradients hand back a
+   * stub with addColorStop(). Pixel reads get a real buffer, so a generator that
+   * paints per-pixel noise still runs (it just paints into nothing).
+   */
+  function makeCanvasContext() {
+    const gradient = { addColorStop() {} };
+    const noop = () => {};
+    return {
+      canvas: null,
+      fillStyle: '', strokeStyle: '', lineWidth: 1, globalAlpha: 1, font: '', textAlign: '',
+      save: noop, restore: noop, translate: noop, rotate: noop, scale: noop,
+      beginPath: noop, closePath: noop, moveTo: noop, lineTo: noop, rect: noop,
+      arc: noop, ellipse: noop, clip: noop, fill: noop, stroke: noop,
+      fillRect: noop, strokeRect: noop, clearRect: noop,
+      fillText: noop, strokeText: noop, measureText: () => ({ width: 10 }),
+      createLinearGradient: () => gradient,
+      createRadialGradient: () => gradient,
+      getImageData: (x, y, w, h) => ({ data: new Uint8ClampedArray(Math.max(4, w * h * 4)), width: w, height: h }),
+      putImageData: noop,
+    };
+  }
+
+  /** Runs `fn` with a minimal document stub (viewmodels and decals create small canvases). */
   function withDocumentStub(fn) {
     const previousDocument = globalThis.document;
     globalThis.document = {
       createElement() {
-        return {
-          width: 0,
-          height: 0,
-          getContext() {
-            return { createRadialGradient() { return { addColorStop() {} }; }, fillRect() {} };
-          },
+        const canvas = { width: 0, height: 0, style: {} };
+        canvas.getContext = () => {
+          const ctx = makeCanvasContext();
+          ctx.canvas = canvas;
+          return ctx;
         };
+        return canvas;
       },
     };
     try {
@@ -1230,6 +1274,604 @@ async function main() {
     } finally {
       pool.dispose();
     }
+  });
+
+  /* ---------------- projectiles ---------------- */
+  const projectiles = await import(pathToFileURL(path.join(JS_DIR, 'projectiles.js')).href);
+  const { ProjectileSystem, MAX_PROJECTILES, SELF_DAMAGE_MULT } = projectiles;
+  console.log('\nProjectiles');
+
+  const stubScene = () => ({ add() {}, remove() {} });
+
+  /**
+   * Blast hooks in the shape the game wires up: hits are resolved with the same
+   * armour + rounding rules Enemy.takeDamage() uses (body shots only), so the
+   * kill counts in these tests are the real ones.
+   */
+  function makeBlastHooks() {
+    const hits = [];
+    const selfHits = [];
+    const blasts = [];
+    return {
+      hits,
+      selfHits,
+      blasts,
+      onEnemyHit: (info) => {
+        const enemy = info.enemy;
+        let dealt = info.damage;
+        if (enemy.type?.armor) dealt *= 1 - enemy.type.armor;
+        dealt = Math.max(1, Math.round(dealt));
+        enemy.health -= dealt;
+        const killed = enemy.health <= 0;
+        hits.push({ enemy, damage: info.damage, dealt, distance: info.distance, weapon: info.weapon, killed });
+        return { killed };
+      },
+      onPlayerHit: (info) => selfHits.push(info),
+      onExplode: (info) => blasts.push(info),
+    };
+  }
+
+  /** Enemy stub with the real type stats, so heights/radii/health are honest. */
+  function makeEnemyAt(x, z, typeId = 'infected') {
+    const type = enemyDefs.ENEMY_TYPES[typeId];
+    return { position: { x, y: 0, z }, type, health: type.maxHealth, isTargetable: () => true };
+  }
+
+  const makeProjectileSystem = (opts = {}) =>
+    new ProjectileSystem(stubScene(), { effects: null, audio: null, ...opts });
+
+  /** A target box straight ahead, for proving a weapon does *not* raycast. */
+  function makeTargetBox(z = -4) {
+    const box = new THREE.Mesh(new THREE.BoxGeometry(0.7, 1, 0.45), new THREE.MeshBasicMaterial());
+    box.position.set(0, 1.5, z);
+    box.userData.enemy = { isTargetable: () => true };
+    box.updateMatrixWorld(true);
+    return box;
+  }
+
+  test('the projectile pool holds 8 rounds, fills in order and recycles oldest-first', () => {
+    const sys = makeProjectileSystem();
+    try {
+      assertEqual(MAX_PROJECTILES, 8, 'the roadmap caps live grenades at 8');
+      assertEqual(sys.instanceCount, MAX_PROJECTILES, 'one instance slot per live round');
+      assertEqual(sys.liveCount, 0, 'the pool starts empty');
+      assertEqual(sys.mesh.count, 0, 'an empty pool is not drawn at all');
+      const slots = [];
+      for (let i = 0; i < 12; i++) {
+        slots.push(sys.spawn({
+          origin: { x: i, y: 1, z: 0 }, dir: { x: 0, y: 0, z: -1 },
+          speed: 12, damage: 140, splashRadius: 4.5, fuse: 10,
+        }));
+        assert(sys.liveCount <= MAX_PROJECTILES, `live count passed the cap (${sys.liveCount})`);
+      }
+      assertEqual(sys.liveCount, MAX_PROJECTILES, 'the pool is full, and no bigger');
+      assertEqual(sys.mesh.count, MAX_PROJECTILES, 'a live round draws the whole pool');
+      assertEqual(slots.slice(0, 8).join(','), '0,1,2,3,4,5,6,7', 'slots are handed out in order');
+      assertEqual(slots[8], 0, 'the ninth round recycles the oldest slot');
+      assertEqual(slots[11], 3, 'and carries on round the ring');
+      assertEqual(sys.instanceCount, MAX_PROJECTILES, 'the pool never grew');
+      sys.clear();
+      assertEqual(sys.mesh.count, 0, 'an emptied pool stops being drawn');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('a round detonates when its fuse runs out, exactly once', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 10, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 0.5, range: 1000,
+      });
+      sys.update(0.4, [], [], hooks);
+      assertEqual(sys.liveCount, 1, 'still flying before the fuse burns out');
+      assertEqual(hooks.blasts.length, 0, 'no blast yet');
+      sys.update(0.2, [], [], hooks);
+      assertEqual(sys.liveCount, 0, 'the fuse took the round');
+      assertEqual(hooks.blasts.length, 1, 'one blast');
+      // The fuse is checked before the frame's movement, so it goes off where it
+      // was when the second frame began (0.4 s of flight at 10 m/s).
+      assertNear(hooks.blasts[0].point.x, 4, 0.5, 'detonation position');
+      assertEqual(sys.instanceCount, MAX_PROJECTILES, 'the pool is unchanged');
+      sys.update(1, [], [], hooks);
+      assertEqual(hooks.blasts.length, 1, 'a spent round does not go off twice');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('a round bounces off walls and closed door panels, and flies through an open one', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const wall = createBox(4, 0, -3, 5, 4, 3, 'wall');
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 10, range: 1000,
+      });
+      for (let i = 0; i < 60; i++) sys.update(1 / 60, [wall], [], hooks);
+      assertEqual(sys.liveCount, 1, 'it is still bouncing, not detonating');
+      assert(sys.px[0] < 4, `the round went through the wall (x=${sys.px[0]})`);
+      assert(sys.vx[0] < 0, 'the wall reversed its velocity');
+
+      // A closed door panel is an active box: it bounces off that too.
+      const door = { openAmount: 0 };
+      const panel = createBox(4, 0, -3, 4.3, 4, 3, 'door');
+      panel.owner = door;
+      sys.clear();
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 10, range: 1000,
+      });
+      for (let i = 0; i < 60; i++) sys.update(1 / 60, [panel], [], hooks);
+      assert(sys.px[0] < 4, 'the closed panel stopped the round');
+      assertEqual(sys.contactOwner[0], door, 'the round remembers the surface it bounced off');
+
+      // The same panel retracted (inactive) lets the round through: it is an
+      // open doorway in the level, not a wall.
+      panel.active = false;
+      sys.clear();
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 10, range: 1000,
+      });
+      for (let i = 0; i < 60; i++) sys.update(1 / 60, [panel], [], hooks);
+      assert(sys.px[0] > 5, `an open door must not stop a grenade (x=${sys.px[0]})`);
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('update() keeps every object it started with: no per-frame allocation', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const slot = sys.spawn({
+        origin: { x: 0, y: 1.5, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 600, range: 1e6,
+      });
+      const identity = {
+        mesh: sys.mesh,
+        instanceMatrix: sys.mesh.instanceMatrix,
+        matrixArray: sys.mesh.instanceMatrix.array,
+        geometry: sys.mesh.geometry,
+        material: sys.material,
+        px: sys.px,
+        vx: sys.vx,
+        fuse: sys.fuse,
+        owner: sys.owner,
+        contactOwner: sys.contactOwner,
+        hits: hooks.hits,
+      };
+      const empty = [];
+      for (let i = 0; i < 600; i++) sys.update(1 / 60, [], empty, hooks);
+      assertEqual(sys.liveCount, 1, 'the round is still in the air after 10 s');
+      assert(sys.px[slot] > 100, `the round actually flew (x=${sys.px[slot].toFixed(1)})`);
+      assertEqual(sys.mesh, identity.mesh, 'same InstancedMesh');
+      assertEqual(sys.mesh.instanceMatrix, identity.instanceMatrix, 'same matrix attribute');
+      assertEqual(sys.mesh.instanceMatrix.array, identity.matrixArray, 'same matrix buffer');
+      assertEqual(sys.mesh.geometry, identity.geometry, 'same geometry');
+      assertEqual(sys.material, identity.material, 'same material');
+      assertEqual(sys.px, identity.px, 'same position buffer');
+      assertEqual(sys.vx, identity.vx, 'same velocity buffer');
+      assertEqual(sys.fuse, identity.fuse, 'same fuse buffer');
+      assertEqual(sys.owner, identity.owner, 'same owner array');
+      assertEqual(sys.contactOwner, identity.contactOwner, 'same contact array');
+      assertEqual(hooks.hits.length, 0, 'nothing was damaged on the way');
+      assertEqual(hooks.blasts.length, 0, 'nothing detonated on the way');
+      assertEqual(sys.instanceCount, MAX_PROJECTILES, 'the pool did not grow');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('20k empty frames do not grow the heap (coarse guard on the tight loop)', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const colliders = [createBox(4, 0, -3, 5, 4, 3, 'wall')];
+      const enemies = [makeEnemyAt(2, 0)];
+      for (let i = 0; i < 500; i++) sys.update(1 / 60, colliders, enemies, hooks); // warm up
+      const before = process.memoryUsage().heapUsed;
+      for (let i = 0; i < 20000; i++) sys.update(1 / 60, colliders, enemies, hooks);
+      const growth = process.memoryUsage().heapUsed - before;
+      // One small object per frame would be ~1 MB here; 512 kB leaves room for
+      // engine noise while still failing loudly on a real per-frame allocation.
+      assert(growth < 512 * 1024, `20k empty frames grew the heap by ${(growth / 1024).toFixed(0)} kB`);
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('splash hits what it can see and ignores anything behind cover', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      // Blast at the origin: one enemy in the open, one behind a wall. Both sit
+      // inside the blast radius, so only line of sight can separate them.
+      const near = makeEnemyAt(1.5, 0);
+      const edge = makeEnemyAt(-4, 0);
+      const behindWall = makeEnemyAt(3.6, 0);
+      const wall = createBox(2, 0, -2, 3, 4, 2, 'wall');
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+        speed: 0, damage: 140, splashRadius: 4.5, fuse: 0.01, range: 1000,
+      });
+      sys.update(0.02, [wall], [near, edge, behindWall], hooks);
+      assertEqual(hooks.blasts.length, 1, 'the round went off');
+      assertEqual(hooks.hits.length, 2, 'the two enemies in the open were caught');
+      const byEnemy = new Map(hooks.hits.map((h) => [h.enemy, h]));
+      assert(byEnemy.has(near) && byEnemy.has(edge), 'both visible enemies took damage');
+      assert(!byEnemy.has(behindWall), 'a wall must stop the blast entirely');
+      // Falloff: close hurts more than the rim.
+      assert(byEnemy.get(near).damage > byEnemy.get(edge).damage, 'damage falls off with distance');
+      const expectedNear = 140 * (1 - 0.75 * (1.5 / 4.5));
+      assertNear(byEnemy.get(near).damage, expectedNear, 0.05, 'damage falls off linearly to 25% at the rim');
+      assert(byEnemy.get(near).damage >= enemyDefs.ENEMY_TYPES.infected.maxHealth,
+        'a body 1.5 m from the blast dies');
+      assertEqual(byEnemy.get(near).weapon, 'launcher', 'the hit reports the launcher');
+      assertEqual(hooks.hits.length, 2, 'nothing else was touched');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('one round clears a clump of infected but spares the ones behind a wall', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const clump = [
+        makeEnemyAt(0.8, 0.4),
+        makeEnemyAt(-1.1, -0.6),
+        makeEnemyAt(0.4, -1.4),
+        makeEnemyAt(-0.7, 1.1),
+        makeEnemyAt(1.6, 1.2, 'runner'),
+      ];
+      const shielded = makeEnemyAt(3.6, 0); // inside the blast radius, behind a wall
+      const wall = createBox(2, 0, -2, 3, 4, 2, 'wall');
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+        speed: 0, damage: 140, splashRadius: 4.5, fuse: 0.01, range: 1000,
+      });
+      sys.update(0.02, [wall], [...clump, shielded], hooks);
+      assertEqual(hooks.hits.length, clump.length, 'every infected in the clump was caught');
+      assert(clump.every((e) => e.health <= 0), 'the clump is dead');
+      assertEqual(hooks.hits.filter((h) => h.killed).length, clump.length, 'all five are kills');
+      assertEqual(shielded.health, enemyDefs.ENEMY_TYPES.infected.maxHealth, 'the shielded one is untouched');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('the thrower can only be hurt by their own blast with line of sight', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const owner = { position: { x: 0, y: 0, z: 0 }, alive: true, height: 1.8, radius: 0.36 };
+      // Blast right next to the shooter, nothing in between.
+      sys.spawn({
+        origin: { x: 0.5, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+        speed: 0, damage: 140, splashRadius: 4.5, fuse: 0.01, range: 1000, owner,
+      });
+      sys.update(0.02, [], [], hooks);
+      assertEqual(hooks.selfHits.length, 1, 'the shooter took their own blast');
+      const expected = 140 * (1 - 0.75 * (0.5 / 4.5)) * SELF_DAMAGE_MULT;
+      assertNear(hooks.selfHits[0].damage, expected, 0.5, 'self damage is scaled and falls off');
+      assertEqual(SELF_DAMAGE_MULT, 0.5, 'the documented self-damage scale');
+
+      // The same blast on the far side of a wall: no damage, no matter how close
+      // the geometry puts the shooter to the surface.
+      hooks.selfHits.length = 0;
+      const wall = createBox(1.4, 0, -2, 2.6, 4, 2, 'wall');
+      const shooter = { position: { x: 3.4, y: 0, z: 0 }, alive: true, height: 1.8 };
+      sys.spawn({
+        origin: { x: 0.5, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+        speed: 0, damage: 140, splashRadius: 4.5, fuse: 0.01, range: 1000, owner: shooter,
+      });
+      sys.update(0.02, [wall], [], hooks);
+      assertEqual(hooks.selfHits.length, 0, 'a wall protects the thrower from their own blast');
+
+      // A dead shooter is not damaged again (the game takes over at that point).
+      hooks.selfHits.length = 0;
+      const dead = { position: { x: 0.5, y: 0, z: 0 }, alive: false, height: 1.8 };
+      sys.spawn({
+        origin: { x: 0.5, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+        speed: 0, damage: 140, splashRadius: 4.5, fuse: 0.01, range: 1000, owner: dead,
+      });
+      sys.update(0.02, [], [], hooks);
+      assertEqual(hooks.selfHits.length, 0, 'a dead owner is skipped');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('a round that touches a body goes off on the spot, wherever the fuse is', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      const enemy = makeEnemyAt(3, 0);
+      sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+        speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 30, range: 1000,
+      });
+      let frames = 0;
+      while (sys.liveCount > 0 && frames < 120) {
+        sys.update(1 / 60, [], [enemy], hooks);
+        frames++;
+      }
+      assert(frames < 30, `proximity should end the flight quickly (took ${frames} frames)`);
+      assertEqual(hooks.blasts.length, 1, 'the round went off against the body');
+      assert(hooks.blasts[0].point.x > 2 && hooks.blasts[0].point.x < 3.6, 'the blast is at the body');
+      assert(enemy.health < enemyDefs.ENEMY_TYPES.infected.maxHealth, 'the body took the blast');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('clear() drops live rounds without a bang and frees their slots', () => {
+    const sys = makeProjectileSystem();
+    try {
+      const hooks = makeBlastHooks();
+      for (let i = 0; i < 3; i++) {
+        sys.spawn({
+          origin: { x: i, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 },
+          speed: 5, damage: 140, splashRadius: 4.5, fuse: 5,
+        });
+      }
+      assertEqual(sys.liveCount, 3, 'three rounds in the air');
+      sys.clear();
+      assertEqual(sys.liveCount, 0, 'clear() empties the pool');
+      sys.update(1, [], [], hooks);
+      assertEqual(hooks.blasts.length, 0, 'no round went off during the clear');
+      assertEqual(sys.spawn({
+        origin: { x: 0, y: 1, z: 0 }, dir: { x: 0, y: 1, z: 0 }, speed: 5, damage: 140, splashRadius: 4.5, fuse: 5,
+      }), 0, 'slots hand out from the start again');
+    } finally {
+      sys.dispose();
+    }
+  });
+
+  test('an explosion leaves a scorch mark that expires and dies with its door', () => {
+    withDocumentStub(() => {
+      const fx = new effects.EffectsManager(decalScene, { bounds: { minX: 0, minZ: 0, maxX: 20, maxZ: 20 } });
+      try {
+        assertEqual(fx.scorch.activeCount, 0, 'no soot before the first blast');
+        fx.spawnExplosion({ x: 0, y: 1, z: 0 }, { radius: 4.5, normal: { x: 0, y: 1, z: 0 }, surface: 'floor' });
+        assertEqual(fx.scorch.activeCount, 1, 'a blast leaves one scorch mark');
+        assert(fx.sparks.count > 0, 'the fireball emitted particles');
+        assert(fx.dust.count > 0, 'the blast emitted smoke');
+        assert(fx.scorch.mesh.count === 12, 'the scorch pool is a fixed-size instanced mesh');
+        fx.update(effects.SCORCH_LIFETIME - 1, 0, null);
+        assertEqual(fx.scorch.activeCount, 1, 'still there a second before it expires');
+        fx.update(1.5, 0, null);
+        assertEqual(fx.scorch.activeCount, 0, 'scorch marks expire on their own');
+
+        // A blast against a door panel hands the pool that panel as the owner.
+        const door = { openAmount: 0 };
+        fx.spawnExplosion({ x: 2, y: 1, z: 0 }, { radius: 4.5, normal: { x: -1, y: 0, z: 0 }, surface: 'metal', owner: door });
+        assertEqual(fx.scorch.activeCount, 1, 'soot on the panel');
+        fx.update(0.016, 0, [door]);
+        assert(scaleOf(fx.scorch, 0) > 0, 'a closed door keeps its soot');
+        door.openAmount = 1;
+        fx.update(0.016, 0, [door]);
+        assertEqual(scaleOf(fx.scorch, 0), 0, 'the soot is culled when the panel retracts');
+
+        fx.clearDecals();
+        assertEqual(fx.scorch.activeCount, 0, 'clearDecals() clears the soot pool too');
+      } finally {
+        fx.dispose();
+      }
+    });
+  });
+
+  test('a blast on a door panel leaves soot the door takes with it when it opens', () => {
+    withDocumentStub(() => {
+      const fx = new effects.EffectsManager(decalScene, { bounds: { minX: 0, minZ: 0, maxX: 20, maxZ: 20 } });
+      const blasts = [];
+      const sys = new ProjectileSystem(stubScene(), {
+        effects: fx,
+        audio: { playExplosion: (pos) => blasts.push(pos) },
+        hooks: {},
+      });
+      try {
+        const door = { openAmount: 0 };
+        const panel = createBox(4, 0, -1, 4.3, 4, 1, 'door');
+        panel.owner = door;
+        sys.spawn({
+          origin: { x: 0, y: 1.5, z: 0 }, dir: { x: 1, y: 0, z: 0 },
+          speed: 20, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 0.6, range: 1000,
+        });
+        const hooks = makeBlastHooks();
+        for (let i = 0; i < 60 && sys.liveCount > 0; i++) sys.update(1 / 60, [panel], [], hooks);
+        assertEqual(sys.liveCount, 0, 'the fuse ended the flight');
+        assertEqual(blasts.length, 1, 'the blast played its positional sound once');
+        assertEqual(fx.scorch.activeCount, 1, 'the panel took a scorch mark');
+        assert(fx.scorch.owner[0] === door, 'the mark belongs to the door panel');
+        fx.update(0.016, 0, [door]);
+        assert(scaleOf(fx.scorch, 0) > 0, 'closed panel shows the soot');
+        door.openAmount = 1;
+        fx.update(0.016, 0, [door]);
+        assertEqual(scaleOf(fx.scorch, 0), 0, 'and the soot goes up with the panel');
+      } finally {
+        sys.dispose();
+        fx.dispose();
+      }
+    });
+  });
+
+  test('a round that cooks off in mid-air scorches the floor under it', () => {
+    withDocumentStub(() => {
+      const fx = new effects.EffectsManager(decalScene, { bounds: { minX: 0, minZ: 0, maxX: 20, maxZ: 20 } });
+      const sys = new ProjectileSystem(stubScene(), { effects: fx, audio: null, hooks: {} });
+      try {
+        sys.spawn({
+          origin: { x: 2, y: 1.4, z: 3 }, dir: { x: 1, y: 0, z: 0 },
+          speed: 5, gravity: 0, damage: 140, splashRadius: 4.5, fuse: 0.2, range: 1000,
+        });
+        for (let i = 0; i < 30 && sys.liveCount > 0; i++) sys.update(1 / 60, [], [], makeBlastHooks());
+        assertEqual(fx.scorch.activeCount, 1, 'a mid-air blast still marks the ground');
+        assert(fx.scorch.activeCount === 1, 'one mark per blast');
+      } finally {
+        sys.dispose();
+        fx.dispose();
+      }
+    });
+  });
+
+  /* ---------------- GL-6 THUMPER ---------------- */
+  console.log('\nGL-6 THUMPER');
+
+  test('the GL-6 def matches the roadmap block and passes the schema', () => {
+    const def = weapon.WEAPON_DEFS.launcher;
+    assertEqual(def.name, 'GL-6 THUMPER', 'name');
+    assertEqual(def.category, 'firearm', 'category');
+    assertEqual(def.ammoKind, 'explosive', 'ammo kind');
+    assertEqual(def.slot, 2, 'defaults to the long-gun slot');
+    assertEqual(def.damage, 140, 'splash damage at the centre');
+    assertEqual(def.fireRate, 0.9, 'rate of fire');
+    assertEqual(def.magazineSize, 1, 'single shot');
+    assertEqual(def.startReserve, 6, 'reserve');
+    assertEqual(def.reloadTime, 2.8, 'reload');
+    assertEqual(def.reloadMode, 'magazine', 'magazine reload');
+    assertEqual(def.auto, false, 'not automatic');
+    assertEqual(def.tracer, false, 'no tracer: the round is visible');
+    assertEqual(def.projectile.speed, 26, 'muzzle velocity');
+    assertEqual(def.projectile.fuse, 1.1, 'fuse');
+    assertEqual(def.splash.radius, 4.5, 'blast radius');
+    assert(weapon.validateWeaponDef(def).valid, `schema: ${weapon.validateWeaponDef(def).errors.join('; ')}`);
+
+    // category-only fields: explosives are firearms' business, never melee's.
+    const knife = weapon.WEAPON_DEFS.knife;
+    assert(weapon.validateWeaponDef({ ...knife, projectile: def.projectile }).errors.some((e) => e.includes('projectile')),
+      'melee must not define a projectile');
+    assert(weapon.validateWeaponDef({ ...knife, splash: def.splash }).errors.some((e) => e.includes('splash')),
+      'melee must not define splash damage');
+    // A projectile without a blast radius is a hit scan with extra steps.
+    const noSplash = { ...def, projectile: { ...def.projectile } };
+    delete noSplash.splash;
+    assert(weapon.validateWeaponDef(noSplash).errors.some((e) => e.includes('splash')),
+      'a projectile weapon needs a splash radius');
+    const badFuse = { ...def, projectile: { ...def.projectile, fuse: 0 } };
+    assert(weapon.validateWeaponDef(badFuse).errors.some((e) => e.includes('fuse')), 'fuse must be positive');
+
+    // Balance guardrails: the documented exceptions live in the dps test, the
+    // ammo row and the sound row are here so a new explosive cannot forget them.
+    assertEqual(weapon.AMMO_PICKUP.launcher, 2, 'explosive rounds come two at a time');
+    assert(weapon.sustainedDps(def) < 60, 'the launcher is a burst weapon by design');
+    assert(audio.EXPLOSION_PROFILES.frag, 'the blast needs its own profile row');
+    assert(audio.EXPLOSION_PROFILES.frag.noise.length > 0 && audio.EXPLOSION_PROFILES.frag.body.length > 0,
+      'the blast row needs noise and body layers');
+  });
+
+  test('the launcher is selectable in a loadout and reports itself to the HUD', () => {
+    const picked = weapon.sanitizeLoadout(['launcher', 'shotgun', 'knife', 'pipe', 'axe']);
+    assertEqual(picked[0], 'launcher', 'slot 1 can hold the thumper');
+    const reversed = weapon.sanitizeLoadout(['shotgun', 'launcher', 'knife', 'pipe', 'axe']);
+    assertEqual(reversed[1], 'launcher', 'and so can slot 2');
+    assertEqual(weapon.hudSlotLabels(reversed)[1], '2 THUMPER', 'HUD chip label');
+    const offered = weapon.loadoutSlotOptions().find((slot) => slot.options.some((o) => o.id === 'launcher'));
+    assert(offered && offered.category === 'firearm', 'the loadout screen offers it as a firearm');
+    assert(weapon.WEAPON_IDS.includes('launcher'), 'in the catalogue');
+    assertEqual(weapon.WEAPON_DEFS.launcher.unlockWave, 3, 'it is flagged as a later unlock');
+  });
+
+  test('firing the launcher spawns one round, spends the round and reloads through the HUD', () => {
+    withDocumentStub(() => {
+      const spawned = [];
+      const shots = [];
+      let rayHits = 0;
+      const target = makeTargetBox(-4);
+      // Snapshots the values the way ProjectileSystem.spawn() copies them: the
+      // weapon reuses one argument block, so anything not copied here would be
+      // overwritten by the next shot.
+      const projectiles = {
+        spawn: (args) => {
+          spawned.push({
+            weapon: args.weapon,
+            damage: args.damage,
+            splashRadius: args.splashRadius,
+            speed: args.speed,
+            gravity: args.gravity,
+            radius: args.radius,
+            fuse: args.fuse,
+            range: args.range,
+            restitution: args.restitution,
+            owner: args.owner,
+            origin: { x: args.origin.x, y: args.origin.y, z: args.origin.z },
+            dir: { x: args.dir.x, y: args.dir.y, z: args.dir.z },
+          });
+          return 0;
+        },
+      };
+      const { camera, system } = makeWeaponSystem(['launcher', 'shotgun', 'knife', 'pipe', 'axe']);
+      system.projectiles = projectiles;
+      system.hooks.onShot = (def, hitAnything) => shots.push({ id: def.id, hitAnything });
+      system.hooks.onEnemyHit = () => { rayHits++; return { killed: false }; };
+      try {
+        const ctx = { canFire: true, colliders: [], hitboxes: () => [target], speedFactor: 0, bobPhase: 0, dt: 0 };
+        system.update(0.8, {}, ctx); // finish the draw
+        assertEqual(system.getHudData().ammo, 1, 'one up the tube');
+        assertEqual(system.def.category, 'firearm', 'the launcher is a firearm to the rest of the HUD');
+        assertEqual(system.getHudData().melee, false, 'it renders an ammo block');
+        system.update(1 / 60, { firePressed: true }, ctx);
+        assertEqual(spawned.length, 1, 'exactly one round left the tube');
+        assertEqual(spawned[0].weapon, 'launcher', 'the round knows its weapon');
+        assertEqual(spawned[0].damage, 140, 'centre damage');
+        assertEqual(spawned[0].splashRadius, 4.5, 'blast radius');
+        assertEqual(spawned[0].speed, 26, 'muzzle velocity');
+        assertEqual(spawned[0].fuse, 1.1, 'fuse');
+        assertEqual(spawned[0].owner, system.player, 'the round remembers who fired it');
+        assert(spawned[0].origin.y > 1.4, 'the round leaves the eye (1.5 m), not the floor');
+        assert(spawned[0].dir.z < -0.9, 'and flies down the crosshair');
+        assertEqual(shots.length, 1, 'onShot fired once');
+        assertEqual(shots[0].hitAnything, false, 'the flight sim owns the hit, not the trigger');
+        assertEqual(rayHits, 0, 'nothing was hit by a ray: this weapon is not hitscan');
+        assertEqual(system.getHudData().ammo, 0, 'the tube is empty');
+        assertEqual(system.state.cooldown > 0, true, 'the launcher is on its rate-of-fire cooldown');
+
+        // Empty: the next trigger pull dry-fires and starts the magazine reload.
+        system.update(1.2, {}, ctx);
+        system.update(1 / 60, { firePressed: true }, ctx);
+        assertEqual(spawned.length, 1, 'no round came out of an empty tube');
+        assertEqual(system.getHudData().reloading, true, 'the HUD shows the reload');
+        assertEqual(system.getHudData().hasAmmo, true, 'the HUD still renders an ammo block');
+        // A magazine reload cannot be interrupted by pulling the trigger.
+        for (let i = 0; i < 10; i++) system.update(0.1, { firePressed: true }, ctx);
+        assertEqual(spawned.length, 1, 'trigger pulls during the reload do nothing');
+        while (system.state.reloading) system.update(0.1, {}, ctx);
+        assertEqual(system.getHudData().ammo, 1, 'the reload put one round back');
+        assertEqual(system.getHudData().reserve, 5, 'out of the six it started with');
+        system.update(1 / 60, { firePressed: true }, ctx);
+        assertEqual(spawned.length, 2, 'and the launcher fires again');
+      } finally {
+        system.dispose();
+        target.geometry.dispose();
+        target.material.dispose();
+      }
+    });
+  });
+
+  test('a round leaves the muzzle clear of the wall the player is hugging', () => {
+    withDocumentStub(() => {
+      const spawned = [];
+      const { camera, system } = makeWeaponSystem(['launcher', 'shotgun', 'knife', 'pipe', 'axe']);
+      system.projectiles = { spawn: (args) => { spawned.push({ x: args.origin.x, y: args.origin.y, z: args.origin.z, dx: args.dir.x, dz: args.dir.z }); return 0; } };
+      try {
+        // Camera 0.36 m from a wall (the player's own collision radius), looking at it.
+        camera.position.set(0, 1.65, 0);
+        camera.lookAt(0, 1.65, -1);
+        camera.updateMatrixWorld(true);
+        system.update(0.8, {}, { canFire: true, colliders: [], hitboxes: () => [], speedFactor: 0, bobPhase: 0 });
+        system.update(1 / 60, { firePressed: true }, { canFire: true, colliders: [], hitboxes: () => [], speedFactor: 0, bobPhase: 0 });
+        assertEqual(spawned.length, 1, 'the round launched');
+        assert(spawned[0].z < 0 && spawned[0].z > -0.36,
+          `the spawn point must stay inside the player's own radius (z=${spawned[0].z})`);
+      } finally {
+        system.dispose();
+      }
+    });
   });
 
   /* ---------------- storage ---------------- */
