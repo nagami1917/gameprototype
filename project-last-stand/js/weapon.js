@@ -601,6 +601,19 @@ export function computeFalloff(def, distance) {
   return 1 - (1 - min) * t;
 }
 
+/**
+ * One viewmodel factory per weapon id. Built once per WeaponSystem and shared
+ * by every loadout, so switching guns never builds geometry and
+ * Game.prewarmShaders() can compile the guns that are not even carried.
+ */
+const VIEWMODEL_BUILDERS = {
+  rifle: buildRifleModel,
+  shotgun: buildShotgunModel,
+  knife: buildKnifeModel,
+  pipe: buildPipeModel,
+  axe: buildAxeModel,
+};
+
 export class WeaponSystem {
   /**
    * @param {object} opts
@@ -608,17 +621,17 @@ export class WeaponSystem {
    * @param {import('./audio.js').AudioManager} opts.audio
    * @param {import('./effects.js').EffectsManager} opts.effects
    * @param {import('./player.js').Player} opts.player
+   * @param {string[]} [opts.loadout]  weapon id per key (1-5); sanitized, defaults to WEAPON_ORDER
    * @param {object} opts.hooks  onShot(def), onEnemyHit({enemy,damage,headshot,point,distance,weapon}) -> {killed},
    *                             onSwitch(def), onReload(def), onMessage(text)
    */
-  constructor({ camera, audio, effects, player, hooks = {} }) {
+  constructor({ camera, audio, effects, player, loadout, hooks = {} }) {
     this.camera = camera;
     this.audio = audio;
     this.effects = effects;
     this.player = player;
     this.hooks = hooks;
 
-    this.states = WEAPON_ORDER.map((id) => new WeaponState(WEAPON_DEFS[id]));
     this.index = 0;
     this.switchTimer = 0;
     this.bloom = 0;
@@ -627,17 +640,13 @@ export class WeaponSystem {
     this.flashTimer = 0;
     this.shotCount = 0;
 
-    this.models = [
-      buildRifleModel(),
-      buildShotgunModel(),
-      buildKnifeModel(),
-      buildPipeModel(),
-      buildAxeModel(),
-    ];
     // Melee weapons are held by the first-person arm rig; firearms stay on the camera.
     this.melee = new MeleeViewmodel(camera);
     this.viewmodelVisible = true;
-    for (const m of this.models) {
+
+    this.viewmodels = new Map(WEAPON_IDS.map((id) => [id, VIEWMODEL_BUILDERS[id]?.() ?? null]));
+    for (const m of this.viewmodels.values()) {
+      if (!m) continue;
       m.group.visible = false;
       m.group.position.set(0.24, -0.24, -0.42);
       if (!m.muzzle) continue; // Only firearms have muzzle-flash sprites.
@@ -654,8 +663,11 @@ export class WeaponSystem {
       m.flash.position.set(0, 0, -0.04);
       m.muzzle.add(m.flash);
     }
-    this.models.forEach((_, i) => this.attachModel(i));
-    this.syncVisibility();
+
+    this.loadout = [];
+    this.states = [];
+    this.models = [];
+    this.setLoadout(loadout);
 
     this.raycaster = new THREE.Raycaster();
     this.raycaster.near = 0;
@@ -677,6 +689,32 @@ export class WeaponSystem {
     return this.states[this.index].def;
   }
 
+  /**
+   * Rebuilds the slots for a new loadout. Only safe between runs (menu/pause):
+   * ammo and the drawn weapon are reset, which a mid-fight swap must not do.
+   * @param {string[]} loadout  weapon id per key, sanitized against the current loadout
+   */
+  setLoadout(loadout) {
+    this.loadout = sanitizeLoadout(loadout, this.loadout);
+    this.states = this.loadout.map((id) => new WeaponState(WEAPON_DEFS[id]));
+    this.index = 0;
+    this.switchTimer = 0;
+    this.bloom = 0;
+    this.aimAmount = 0;
+    this.viewKick = 0;
+    this.flashTimer = 0;
+    this.shotCount = 0;
+    this.melee.reset();
+    this.bindModels();
+  }
+
+  /** Points the slot list at the viewmodels of the current loadout. */
+  bindModels() {
+    this.models = this.loadout.map((id) => this.viewmodels.get(id));
+    this.models.forEach((_, i) => this.attachModel(i));
+    this.syncVisibility();
+  }
+
   reset() {
     for (const s of this.states) s.reset();
     this.index = 0;
@@ -687,12 +725,14 @@ export class WeaponSystem {
     this.flashTimer = 0;
     this.melee.reset();
     this.viewmodelVisible = true;
-    this.models.forEach((m) => {
-      if (m.flash) {
+    // Every viewmodel, not just the carried ones: a gun may have flashed before
+    // a loadout change and must not come back with a stuck muzzle flash.
+    for (const m of this.viewmodels.values()) {
+      if (m?.flash) {
         m.flash.visible = false;
         m.flash.material.opacity = 0;
       }
-    });
+    }
     this.models.forEach((_, i) => this.attachModel(i));
     this.syncVisibility();
   }
@@ -721,7 +761,7 @@ export class WeaponSystem {
     this.melee.setVisible(visible && this.def.category === 'melee');
   }
 
-  /** Switches by slot index; firearms keep slots 1-2 and melee uses slots 3-5. */
+  /** Switches by slot index: key `index + 1`, whatever `loadout[index]` is. */
   requestSwitch(index) {
     if (index < 0 || index >= this.states.length || index === this.index) return false;
     const old = this.state;
@@ -800,7 +840,8 @@ export class WeaponSystem {
     const materials = new Set();
     const textures = new Set();
     this.melee.dispose();
-    for (const model of this.models) {
+    for (const model of this.viewmodels.values()) {
+      if (!model) continue;
       model.group.removeFromParent();
       model.group.traverse((object) => {
         if (object.geometry) geometries.add(object.geometry);
@@ -1251,7 +1292,7 @@ export class WeaponSystem {
       attacking: st.attacking,
       reloading: st.reloading,
       switching: this.switchTimer > 0,
-      slot: st.def.slot,
+      slot: this.index + 1, // the live key, not the def's default slot
       auto: st.def.auto,
     };
   }

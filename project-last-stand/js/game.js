@@ -18,7 +18,7 @@
 import * as THREE from 'three';
 import { Level } from './level.js';
 import { Player } from './player.js';
-import { WeaponSystem } from './weapon.js';
+import { WeaponSystem, sanitizeLoadout, hudSlotLabels, loadoutSlotOptions } from './weapon.js';
 import { Enemy, warmEnemyVisuals } from './enemy.js';
 import { EnemyAI } from './enemyAI.js';
 import { WaveManager } from './waveManager.js';
@@ -86,6 +86,9 @@ export class Game {
     this.audio = audio;
     this.storageData = storage;
     this.settings = sanitizeSettings(storage.settings || DEFAULT_SETTINGS);
+    this.loadout = sanitizeLoadout(storage.loadout);
+    // What the loadout screen may offer per slot; the defs are static.
+    this.loadoutSlots = loadoutSlotOptions();
 
     this.state = STATE.LOADING;
     this.time = 0;
@@ -185,6 +188,7 @@ export class Game {
       audio: this.audio,
       effects: this.effects,
       player: this.player,
+      loadout: this.loadout,
       hooks: {
         onShot: (def) => this.onShot(def),
         onEnemyHit: (info) => this.onEnemyHit(info),
@@ -234,6 +238,8 @@ export class Game {
     this.weapons.reset();
     this.prewarmShaders();
     this.ui.writeSettingsControls(this.settings);
+    this.ui.setLoadout(hudSlotLabels(this.loadout));
+    this.ui.writeLoadoutControls(this.loadout, this.loadoutSlots);
     this.ui.setRecords(this.storageData);
     this.setState(STATE.MENU);
     this.ui.setMode('menu');
@@ -427,6 +433,28 @@ export class Game {
   resetSettings() {
     this.updateSettings({ ...DEFAULT_SETTINGS });
     this.ui.writeSettingsControls(this.settings);
+  }
+
+  /* ------------------------------------------------------------------ *
+   * Loadout
+   * ------------------------------------------------------------------ */
+  /**
+   * Applies a loadout picked in the menu: sanitize it against the current kit,
+   * rebuild the weapon slots, repaint the HUD chips and persist it.
+   * @param {string[]} ids       weapon id per key; missing keys keep the current weapon
+   * @param {boolean} [persist]  false for the `?weapons=` debug override
+   * @returns {string[]} the loadout that was actually applied
+   */
+  setLoadout(ids, persist = true) {
+    this.loadout = sanitizeLoadout(ids, this.loadout);
+    this.weapons.setLoadout(this.loadout);
+    this.ui.setLoadout(hudSlotLabels(this.loadout));
+    this.ui.writeLoadoutControls(this.loadout, this.loadoutSlots);
+    if (persist) {
+      this.storageData = { ...this.storageData, loadout: this.loadout };
+      saveStorage(this.storageData);
+    }
+    return this.loadout;
   }
 
   /* ------------------------------------------------------------------ *

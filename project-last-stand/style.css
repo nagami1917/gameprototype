@@ -773,6 +773,29 @@ body {
   color: var(--muted);
 }
 
+/* Loadout */
+.loadout-row {
+  grid-template-columns: 1fr 1.6fr;
+}
+
+.loadout-select {
+  width: 100%;
+  padding: 8px 10px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  background: rgba(20, 26, 33, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  cursor: pointer;
+}
+
+.loadout-select:hover,
+.loadout-select:focus-visible {
+  border-color: var(--accent);
+  outline: none;
+}
+
 /* Controls */
 .controls-table {
   width: 100%;
@@ -934,6 +957,7 @@ body {
   .setting { grid-template-columns: 1fr; gap: 6px; }
   .setting output { text-align: left; }
   .setting-toggle { grid-template-columns: 1fr auto; }
+  .loadout-row { grid-template-columns: 1fr; }
   .stats { grid-template-columns: 1fr; }
   .button-row .btn { width: 100%; }
   .record-panel { flex-direction: column; }

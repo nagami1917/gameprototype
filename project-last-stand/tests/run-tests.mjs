@@ -459,6 +459,53 @@ async function main() {
     assertEqual(bad({}).errors.length, 0, 'an untouched clone is still valid');
   });
 
+  test('the default loadout mirrors the legacy weapon order and slot categories', () => {
+    assertEqual(weapon.DEFAULT_LOADOUT.join(','), weapon.WEAPON_ORDER.join(','), 'default loadout');
+    assertEqual(weapon.SLOT_COUNT, 5, 'five slots');
+    assertEqual(weapon.SLOT_CATEGORIES.length, weapon.SLOT_COUNT, 'one category per slot');
+    weapon.DEFAULT_LOADOUT.forEach((id, i) => {
+      assertEqual(weapon.WEAPON_DEFS[id].category, weapon.SLOT_CATEGORIES[i], `slot ${i + 1} accepts the right category`);
+      assertEqual(weapon.WEAPON_DEFS[id].slot, i + 1, `${id} keeps its default slot`);
+    });
+    assertEqual(weapon.hudSlotLabels().join('|'), '1 RIFLE|2 SHOTGUN|3 KNIFE|4 PIPE|5 AXE', 'HUD labels');
+  });
+
+  test('sanitizeLoadout drops duplicates, unknown ids and wrong-category picks', () => {
+    const clean = weapon.sanitizeLoadout(['shotgun', 'shotgun', 'axe', 'nope', 'axe']);
+    assertEqual(clean.length, weapon.SLOT_COUNT, 'always five slots');
+    assertEqual(new Set(clean).size, weapon.SLOT_COUNT, 'no weapon occupies two slots');
+    assertEqual(clean[0], 'shotgun', 'a legal pick is kept');
+    assertEqual(clean[1], 'rifle', 'a duplicate firearm falls back to the default');
+    assertEqual(clean[2], 'axe', 'a legal melee pick is kept');
+    assertEqual(clean[3], 'pipe', 'an unknown id falls back');
+    assertEqual(clean[4], 'knife', 'a duplicate melee falls back to a free weapon');
+
+    // Category bands: a firearm in a melee slot (and the reverse) is rejected.
+    assertEqual(weapon.sanitizeLoadout(['axe', 'pipe', 'rifle', 'shotgun', 'knife']).join(','),
+      weapon.DEFAULT_LOADOUT.join(','), 'wrong-category picks fall back');
+    // Short, missing and nonsense input keeps the rest of the kit.
+    assertEqual(weapon.sanitizeLoadout(['shotgun']).join(','), 'shotgun,rifle,knife,pipe,axe', 'short array');
+    assertEqual(weapon.sanitizeLoadout(undefined).join(','), weapon.DEFAULT_LOADOUT.join(','), 'undefined input');
+    assertEqual(weapon.sanitizeLoadout('rifle').join(','), weapon.DEFAULT_LOADOUT.join(','), 'non-array input');
+    assertEqual(weapon.sanitizeLoadout(null, ['nope']).join(','), weapon.DEFAULT_LOADOUT.join(','), 'bogus fallback');
+  });
+
+  test('loadoutSlotOptions offers only weapons that fit the slot', () => {
+    const slots = weapon.loadoutSlotOptions();
+    assertEqual(slots.length, weapon.SLOT_COUNT, 'one entry per key');
+    for (const slot of slots) {
+      assert(slot.options.length >= 2, `${slot.name} needs choices`);
+      for (const option of slot.options) {
+        assertEqual(weapon.WEAPON_DEFS[option.id].category, slot.category, `${option.id} in ${slot.name}`);
+        assert(option.unlockWave >= 1, `${option.id} carries its unlock wave`);
+      }
+    }
+    assertEqual(slots[0].category, 'firearm', 'slot 1 is a firearm slot');
+    assertEqual(slots[2].category, 'melee', 'slot 3 is a melee slot');
+    const offered = new Set(slots.flatMap((s) => s.options.map((o) => o.id)));
+    assertEqual(offered.size, Object.keys(weapon.WEAPON_DEFS).length, 'every weapon is offered somewhere');
+  });
+
   test('sustained DPS of every firearm sits inside the 60-160 band', () => {
     for (const [id, def] of Object.entries(weapon.WEAPON_DEFS)) {
       if (def.category !== 'firearm') {
@@ -755,6 +802,74 @@ async function main() {
     });
   });
 
+  /* ---------------- loadout slots ---------------- */
+  console.log('\nLoadout slots');
+
+  /** A WeaponSystem with the minimal stubs, for any loadout. */
+  function makeWeaponSystem(loadout) {
+    const camera = new THREE.PerspectiveCamera();
+    camera.position.set(0, 1.5, 0);
+    camera.lookAt(0, 1.5, -1);
+    camera.updateMatrixWorld(true);
+    const system = new weapon.WeaponSystem({
+      camera,
+      loadout,
+      audio: {
+        playSwitch() {}, playDryFire() {}, playReload() {}, playShot() {}, playHitFlesh() {}, playMeleeSwing() {},
+      },
+      effects: { spawnBlood() {}, spawnImpact() {}, spawnTracer() {} },
+      player: { addRecoil() {}, addTrauma() {} },
+      hooks: {},
+    });
+    return { camera, system };
+  }
+
+  test('WeaponSystem builds its slots from the loadout, so keys 1-5 follow it', () => {
+    withDocumentStub(() => {
+      const { camera, system } = makeWeaponSystem(['shotgun', 'rifle', 'axe', 'knife', 'pipe']);
+      try {
+        assertEqual(system.loadout.join(','), 'shotgun,rifle,axe,knife,pipe', 'loadout applied in order');
+        assertEqual(system.states[0].def.id, 'shotgun', 'slot 1 is the shotgun');
+        assertEqual(system.states[0].ammo, weapon.WEAPON_DEFS.shotgun.magazineSize, 'ammo state follows the weapon');
+        assertEqual(system.models[0].group.parent, camera, 'the shotgun viewmodel is drawn first');
+        assertEqual(system.getHudData().slot, 1, 'the HUD shows the live key, not the def slot');
+
+        assertEqual(system.requestSwitch(2), true, 'key 3 works');
+        assertEqual(system.def.id, 'axe', 'key 3 draws the axe');
+        assertEqual(system.getHudData().slot, 3, 'HUD key');
+        assertEqual(system.models[2].group.parent, system.melee.socket, 'melee viewmodels use the arm rig');
+        assertEqual(system.requestSwitch(4), true, 'key 5 works');
+        assertEqual(system.def.id, 'pipe', 'key 5 draws the pipe');
+        assertEqual(system.requestSwitch(5), false, 'there is no key 6');
+
+        system.setLoadout(weapon.DEFAULT_LOADOUT);
+        assertEqual(system.loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'loadout swapped');
+        assertEqual(system.states[0].def.id, 'rifle', 'states rebuilt for the new slots');
+        assertEqual(system.index, 0, 'slot 1 is drawn after a swap');
+        assertEqual(system.models[1].group.parent, camera, 'every slot is attached again');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
+  test('a custom loadout never leaks a weapon into two slots or the wrong category', () => {
+    withDocumentStub(() => {
+      const { system } = makeWeaponSystem(['shotgun', 'shotgun', 'axe', 'axe', 'axe']);
+      try {
+        assertEqual(new Set(system.loadout).size, weapon.SLOT_COUNT, 'every slot holds a different weapon');
+        for (let i = 0; i < weapon.SLOT_COUNT; i++) {
+          assertEqual(system.states[i].def.category, weapon.SLOT_CATEGORIES[i], `slot ${i + 1} category`);
+        }
+        const before = system.loadout.join(',');
+        system.setLoadout(['nope', 'nope', 'nope', 'nope', 'nope']);
+        assertEqual(system.loadout.join(','), before, 'an all-garbage pick keeps the current kit');
+      } finally {
+        system.dispose();
+      }
+    });
+  });
+
   /* ---------------- decals ---------------- */
   const effects = await import(pathToFileURL(path.join(JS_DIR, 'effects.js')).href);
   const { DecalPool, HOLE_LIFETIME, BLOOD_DECAL_LIFETIME, DECAL_FADE_TIME } = effects;
@@ -928,6 +1043,19 @@ async function main() {
     assertEqual(second.record.runs, 2, 'run count');
     const reloaded = storage.loadStorage();
     assertEqual(reloaded.highScore, 1200, 'persisted high score');
+  });
+
+  test('loadStorage returns a sanitized loadout and defaults when it is missing', () => {
+    memory.clear();
+    assertEqual(storage.loadStorage().loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'default when missing');
+    memory.set(storage.STORAGE_KEY, JSON.stringify({ loadout: ['shotgun', 'shotgun', 'axe', 'nope', 'nope'] }));
+    const loaded = storage.loadStorage();
+    assertEqual(loaded.loadout.length, weapon.SLOT_COUNT, 'five slots after a round trip');
+    assertEqual(new Set(loaded.loadout).size, weapon.SLOT_COUNT, 'no duplicates survive a round trip');
+    assertEqual(loaded.loadout[0], 'shotgun', 'a valid pick is kept');
+    memory.set(storage.STORAGE_KEY, JSON.stringify({ loadout: 'rifle' }));
+    assertEqual(storage.loadStorage().loadout.join(','), weapon.DEFAULT_LOADOUT.join(','), 'garbage falls back');
+    memory.delete(storage.STORAGE_KEY);
   });
 
   test('storage failures do not throw', () => {
