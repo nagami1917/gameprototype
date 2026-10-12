@@ -153,6 +153,46 @@ export const WEAPON_DEFS = {
     tracer: true,
     sound: 'dmr',
   },
+  launcher: {
+    id: 'launcher',
+    category: 'firearm',
+    name: 'GL-6 THUMPER',
+    shortName: 'THUMPER',
+    slot: 2,                 // the long-gun slot, next to the shotgun and the marksman
+    ammoKind: 'explosive',
+    unlockWave: 3,           // the gate is not wired yet: the loadout screen just flags it
+    moveSpeedMult: 1,
+    adsZoom: 1,
+    damage: 140,             // splash damage at the centre of the blast
+    headshotMultiplier: 1.15, // nominal only: an explosion has no aiming point (schema wants > 1)
+    fireRate: 0.9,           // single shot, then a long reload: this is a decision, not a spray
+    auto: false,
+    magazineSize: 1,         // one up the tube
+    startReserve: 6,
+    maxReserve: 12,          // so an ammo box can still top the thumper up
+    reloadTime: 2.8,
+    reloadMode: 'magazine',
+    switchTime: 0.7,
+    pellets: 1,              // the projectile path ignores pellets: one trigger, one round
+    spread: 0.012,           // launch jitter, tightened while aiming
+    bloomPerShot: 0,
+    maxBloom: 0,
+    bloomDecay: 5,
+    range: 120,              // metres of flight before the round self-destructs
+    falloff: null,           // distance never weakens a blast, the splash curve does
+    penetration: 0,          // an explosion does not pierce, it spreads
+    projectile: {
+      speed: 26,             // flat enough to put a round through a doorway at 30 m
+      gravity: 6.5,          // a visible arc, but not a mortar
+      radius: 0.11,          // collision sphere of the round itself
+      fuse: 1.1,             // cooks off if it has not met a body, a wall is bounced off
+      restitution: 0.35,     // ricochets off walls, closed door panels and the floor
+    },
+    splash: { radius: 4.5 },
+    recoil: { pitch: 0.05, yaw: 0.008, kick: 0.16, trauma: 0.5 },
+    tracer: false,           // the round itself is visible: no tracer line
+    sound: 'launcher',
+  },
   knife: {
     id: 'knife',
     category: 'melee',
@@ -246,6 +286,7 @@ export const AMMO_PICKUP = {
   shotgun: 10,
   smg: 90,     // cheap, small rounds: pickups top the Viper up quickly
   dmr: 24,     // marksman rounds are the reason the DMR is not the default gun
+  launcher: 2, // explosive rounds are the rarest thing in the facility
 };
 
 /** Every weapon that can be picked in a loadout, in catalogue order. */
@@ -333,7 +374,7 @@ const REQUIRED_FIELDS = {
 const CATEGORY_ONLY_FIELDS = {
   firearm: ['magazineSize', 'startReserve', 'maxReserve', 'reloadTime', 'reloadMode', 'ammoKind',
     'auto', 'pellets', 'spread', 'bloomPerShot', 'maxBloom', 'bloomDecay', 'recoil', 'falloff',
-    'headshotMultiplier', 'penetration', 'adsZoom', 'tracer', 'sound'],
+    'headshotMultiplier', 'penetration', 'adsZoom', 'tracer', 'sound', 'projectile', 'splash'],
   melee: ['reach', 'arcDegrees', 'rayCount', 'maxTargets', 'hitTime', 'attackDuration',
     'swing', 'windup', 'strikeEnd', 'activeTime', 'trailColor'],
 };
@@ -406,6 +447,21 @@ export function validateWeaponDef(def, allDefs = WEAPON_DEFS, loadout = DEFAULT_
     if (def.falloff) {
       if (!(def.falloff.start >= 0 && def.falloff.end > def.falloff.start)) fail('falloff end must be past its start');
       if (!(def.falloff.min > 0 && def.falloff.min <= 1)) fail('falloff min must be in (0, 1]');
+    }
+    // Explosives: a projectile needs a flight model and a blast radius, because
+    // the damage no longer comes from a traceRay().
+    if (def.projectile) {
+      const p = def.projectile;
+      if (!(p.speed > 0)) fail('projectile.speed must be greater than 0');
+      if (!(p.radius > 0)) fail('projectile.radius must be greater than 0');
+      if (!(p.fuse > 0)) fail('projectile.fuse must be greater than 0');
+      if (p.gravity !== undefined && !(p.gravity >= 0)) fail('projectile.gravity must be zero or more');
+      if (p.restitution !== undefined && !(p.restitution >= 0 && p.restitution <= 1)) {
+        fail('projectile.restitution must be in 0..1');
+      }
+      if (!def.splash || !(def.splash.radius > 0)) fail('a projectile weapon needs a splash radius');
+    } else if (def.splash) {
+      fail('splash damage needs a projectile to carry it');
     }
   } else {
     if (!(def.hitTime >= 0 && def.hitTime < def.attackDuration)) fail('hitTime must be inside the attack');
@@ -760,8 +816,34 @@ function buildDmrModel() {
   });
 }
 
+/** GL-6 THUMPER: single-shot fat tube, revolver-style drum, stubby stock. */
+function buildLauncherModel() {
+  return buildParametricFirearm({
+    colors: { body: 0x2b2f26, frame: 0x171a14, accent: 0xd08a1e },
+    receiver: { w: 0.105, h: 0.125, d: 0.34 },
+    barrels: [
+      { r0: 0.045, r1: 0.05, len: 0.34, y: 0.012, z: -0.32 },  // fat bore
+      { r0: 0.052, r1: 0.054, len: 0.06, y: 0.012, z: -0.51 }, // muzzle collar
+      { r0: 0.055, r1: 0.055, len: 0.14, y: -0.05, z: 0.01 },  // breech drum
+    ],
+    boxes: [
+      { w: 0.08, h: 0.065, d: 0.2, y: -0.03, z: -0.24 },                     // handguard
+      { w: 0.03, h: 0.035, d: 0.3, y: 0.078, z: -0.12, color: 'body' },      // top rail
+      { w: 0.03, h: 0.055, d: 0.04, y: 0.112, z: -0.3 },                     // front sight
+      { w: 0.06, h: 0.12, d: 0.06, y: -0.11, z: 0.12, rx: -0.3 },            // grip
+      { w: 0.07, h: 0.1, d: 0.24, y: -0.015, z: 0.28, rx: -0.04 },           // stock
+      { w: 0.108, h: 0.012, d: 0.16, y: 0.032, z: -0.06, color: 'accent' },  // hazard stripe
+      { w: 0.112, h: 0.02, d: 0.05, y: 0.05, z: 0.07, color: 'accent' },     // breech marking
+    ],
+    muzzle: { x: 0, y: 0.012, z: -0.55 },
+  });
+}
+
 /** Damage each body behind the first takes, compounding: 60%, then 36%. */
 export const PENETRATION_DAMAGE_MULT = 0.6;
+
+/** How far in front of the eye an explosive round leaves the tube, in metres. */
+export const PROJECTILE_SPAWN_OFFSET = 0.3;
 
 /**
  * Damage multiplier for a hit at `distance` metres.
@@ -784,6 +866,7 @@ const VIEWMODEL_BUILDERS = {
   shotgun: buildShotgunModel,
   smg: buildSmgModel,
   dmr: buildDmrModel,
+  launcher: buildLauncherModel,
   knife: buildKnifeModel,
   pipe: buildPipeModel,
   axe: buildAxeModel,
@@ -800,11 +883,14 @@ export class WeaponSystem {
    * @param {object} opts.hooks  onShot(def), onEnemyHit({enemy,damage,headshot,point,distance,weapon}) -> {killed},
    *                             onSwitch(def), onReload(def), onMessage(text)
    */
-  constructor({ camera, audio, effects, player, loadout, hooks = {} }) {
+  constructor({ camera, audio, effects, player, loadout, projectiles = null, hooks = {} }) {
     this.camera = camera;
     this.audio = audio;
     this.effects = effects;
     this.player = player;
+    // Explosive weapons spawn a round in here instead of tracing a ray.
+    this.projectiles = projectiles;
+    this.warnedProjectiles = false;
     this.hooks = hooks;
 
     this.index = 0;
@@ -854,6 +940,22 @@ export class WeaponSystem {
     this._muzzle = new THREE.Vector3();
     this._rayOrigin = { x: 0, y: 0, z: 0 };
     this._rayDirection = { x: 0, y: 0, z: -1 };
+    // Reused spawn argument block: a shot copies its numbers into the pool and
+    // keeps no reference to this object, so one block serves every shot.
+    this._projectileArgs = {
+      origin: this._origin,
+      dir: this._dir,
+      speed: 0,
+      gravity: 0,
+      radius: 0,
+      damage: 0,
+      splashRadius: 0,
+      fuse: 0,
+      range: 0,
+      restitution: 0,
+      owner: null,
+      weapon: 'launcher',
+    };
   }
 
   get state() {
@@ -883,9 +985,24 @@ export class WeaponSystem {
     this.bindModels();
   }
 
-  /** Points the slot list at the viewmodels of the current loadout. */
+  /**
+   * Points the slot list at the viewmodels of the current loadout.
+   *
+   * Viewmodels are built once per WeaponSystem and shared by every loadout, so a
+   * gun that has just left the kit is still hanging off the camera and still
+   * flagged visible. `syncVisibility()` only walks the current slots, so the
+   * leavers are hidden here - otherwise the previous kit stays on screen behind
+   * the new one. They stay parented on purpose: `Game.prewarmShaders()` reveals
+   * and compiles every viewmodel at startup (three only compiles what is in the
+   * scene graph), which is what keeps a loadout change from compiling a shader
+   * mid-run.
+   */
   bindModels() {
     this.models = this.loadout.map((id) => this.viewmodels.get(id));
+    for (const [id, model] of this.viewmodels) {
+      if (!model || this.loadout.includes(id)) continue;
+      model.group.visible = false;
+    }
     this.models.forEach((_, i) => this.attachModel(i));
     this.syncVisibility();
   }
@@ -1263,8 +1380,38 @@ export class WeaponSystem {
     return true;
   }
 
-  /** Shot direction, pellets, hit resolution and feedback. */
+  /**
+   * Shot direction, split off so the hitscan and the projectile paths sample the
+   * cone exactly the same way.
+   * @returns {THREE.Vector3} `out`, normalised
+   */
+  sampleDirection(forward, right, up, spread, out) {
+    // Uniform sample inside a disc for an even pellet pattern.
+    const r = spread * Math.sqrt(Math.random());
+    const a = Math.random() * Math.PI * 2;
+    return out
+      .copy(forward)
+      .addScaledVector(right, Math.cos(a) * r)
+      .addScaledVector(up, Math.sin(a) * r)
+      .normalize();
+  }
+
+  /** Cone half-angle of the shot being fired: base + bloom, ADS tighter, moving looser. */
+  shotSpread(def, ctx) {
+    const aimMult = 1 - 0.55 * this.aimAmount;
+    const moveMult = 1 + 0.6 * (ctx.speedFactor || 0);
+    return (def.spread + this.bloom) * aimMult * moveMult;
+  }
+
+  /**
+   * Dispatches a trigger pull: hitscan weapons trace, explosive ones launch a
+   * round. The hitscan path below is untouched for every other weapon.
+   */
   fireShot(def, ctx) {
+    if (def.projectile) {
+      this.fireProjectile(def, ctx);
+      return;
+    }
     const cam = this.camera;
     cam.updateMatrixWorld(true);
     const origin = this._origin.setFromMatrixPosition(cam.matrixWorld);
@@ -1272,23 +1419,13 @@ export class WeaponSystem {
     const right = this._right.setFromMatrixColumn(cam.matrixWorld, 0).normalize();
     const up = this._up.setFromMatrixColumn(cam.matrixWorld, 1).normalize();
 
-    // Spread: base + bloom, tighter while aiming, looser while moving.
-    const aimMult = 1 - 0.55 * this.aimAmount;
-    const moveMult = 1 + 0.6 * (ctx.speedFactor || 0);
-    const spread = (def.spread + this.bloom) * aimMult * moveMult;
+    const spread = this.shotSpread(def, ctx);
     if (def.bloomPerShot) this.bloom = Math.min(def.maxBloom, this.bloom + def.bloomPerShot);
 
     const hitboxes = ctx.hitboxes();
     const results = [];
     for (let i = 0; i < def.pellets; i++) {
-      // Uniform sample inside a disc for an even pellet pattern.
-      const r = spread * Math.sqrt(Math.random());
-      const a = Math.random() * Math.PI * 2;
-      const dir = this._dir
-        .copy(forward)
-        .addScaledVector(right, Math.cos(a) * r)
-        .addScaledVector(up, Math.sin(a) * r)
-        .normalize();
+      const dir = this.sampleDirection(forward, right, up, spread, this._dir);
       results.push(this.traceRay(origin, dir, def.range, ctx, hitboxes, def.penetration || 0));
     }
 
@@ -1324,18 +1461,71 @@ export class WeaponSystem {
       const end = results[0].behind ? results[0].behind.point : results[0].point;
       this.effects.spawnTracer(muzzle, end, 0xffd27a);
     }
-    this.flashTimer = 0.05;
-    this.models[this.index].flash.material.rotation = Math.random() * Math.PI;
-    this.models[this.index].flash.material.opacity = 1;
-    this.viewKick = Math.min(1, this.viewKick + def.recoil.kick * 6);
+    this.fireFeedback(def);
+    this.hooks.onShot?.(def, hitAnything);
+  }
 
+  /**
+   * Fires an explosive round. Ammo, cooldown, the case counter, the viewmodel
+   * kick, recoil, trauma and the shot sound are all identical to a hitscan shot
+   * - only the hit resolution moves into ProjectileSystem, which owns the flight,
+   * the bounce and the splash. Keeping `hooks.onShot` means scoring, the crosshair
+   * flash and the AI noise stay in one place for both kinds of weapon.
+   */
+  fireProjectile(def, ctx) {
+    const proj = def.projectile;
+    const cam = this.camera;
+    cam.updateMatrixWorld(true);
+    const origin = this._origin.setFromMatrixPosition(cam.matrixWorld);
+    const forward = cam.getWorldDirection(this._forward);
+    const right = this._right.setFromMatrixColumn(cam.matrixWorld, 0).normalize();
+    const up = this._up.setFromMatrixColumn(cam.matrixWorld, 1).normalize();
+
+    const spread = this.shotSpread(def, ctx);
+    if (def.bloomPerShot) this.bloom = Math.min(def.maxBloom, this.bloom + def.bloomPerShot);
+    const dir = this.sampleDirection(forward, right, up, spread, this._dir);
+
+    // The round leaves the eye, not the muzzle marker: the muzzle sits to the
+    // right of the camera and would start inside the wall a player is hugging.
+    // PROJECTILE_SPAWN_OFFSET is inside the player's own collision radius, so a
+    // round can never spawn buried in geometry.
+    const args = this._projectileArgs;
+    args.origin = origin.addScaledVector(dir, PROJECTILE_SPAWN_OFFSET);
+    args.dir = dir;
+    args.speed = proj.speed;
+    args.gravity = proj.gravity ?? 0;
+    args.radius = proj.radius ?? 0.09;
+    args.damage = def.damage;
+    args.splashRadius = def.splash?.radius ?? 0;
+    args.fuse = proj.fuse ?? 3;
+    args.range = def.range;
+    args.restitution = proj.restitution ?? 0.35;
+    args.owner = this.player;
+    args.weapon = def.id;
+    if (this.projectiles) {
+      this.projectiles.spawn(args);
+    } else if (!this.warnedProjectiles) {
+      // Happens only in a headless harness that forgot to wire the flight sim.
+      this.warnedProjectiles = true;
+      console.warn(`[weapon] ${def.id} fired without a ProjectileSystem: no round left the tube.`);
+    }
+    this.fireFeedback(def);
+    this.hooks.onShot?.(def, false);
+  }
+
+  /** Muzzle flash, kick, recoil, trauma and the shot sound: common to every firearm. */
+  fireFeedback(def) {
+    const model = this.models[this.index];
+    this.flashTimer = 0.05;
+    model.flash.material.rotation = Math.random() * Math.PI;
+    model.flash.material.opacity = 1;
+    this.viewKick = Math.min(1, this.viewKick + def.recoil.kick * 6);
     this.player.addRecoil(
       def.recoil.pitch,
       (Math.random() - 0.5) * 2 * def.recoil.yaw,
     );
     this.player.addTrauma(def.recoil.trauma);
     this.audio.playShot(def.sound);
-    this.hooks.onShot?.(def, hitAnything);
   }
 
   /**

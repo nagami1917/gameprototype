@@ -1,12 +1,13 @@
 # Weapons roadmap — more guns for PROJECT: LAST STAND
 
-Status: **milestones 0–2 landed** (schema + validation, loadouts, S-9 VIPER and
-MKR-1 MARKSMAN). See "Implementation notes" at the bottom for the numbers that
-were actually shipped and where they deviate from this document. Milestones 3–6
-(projectiles, melee + pistol, ammo kinds, LMG + attachments) are still design.
-Covers new firearms, new melee, throwables and the systems they need. Today the
-game ships 7 weapons: MX-7 rifle, HB-12 shotgun, S-9 SMG, MKR-1 marksman, field
-knife, steel pipe, fire axe (`js/weapon.js` → `WEAPON_DEFS`).
+Status: **milestones 0–3 landed** (schema + validation, loadouts, S-9 VIPER and
+MKR-1 MARKSMAN, `js/projectiles.js` + the GL-6 THUMPER). See "Implementation
+notes" at the bottom for the numbers that were actually shipped and where they
+deviate from this document. Milestones 4–6 (melee + pistol, ammo kinds, LMG +
+attachments) are still design. Covers new firearms, new melee, throwables and
+the systems they need. Today the game ships 8 weapons: MX-7 rifle, HB-12
+shotgun, S-9 SMG, MKR-1 marksman, GL-6 thumper, field knife, steel pipe, fire
+axe (`js/weapon.js` → `WEAPON_DEFS`).
 
 ---
 
@@ -84,8 +85,9 @@ One extra key (`G`) with a small stack, sharing the projectile system:
 
 ### 3.1 Projectiles (`js/projectiles.js`) — the big one
 
-Everything explosive needs it. Design (pooled, allocation-free, same rules as
-`ParticleSystem`):
+Everything explosive needs it. **Landed in milestone 3 — the shipped behaviour,
+including the self-damage and splash-LoS rules, is recorded in §7.** Design
+(pooled, allocation-free, same rules as `ParticleSystem`):
 
 ```
 ProjectileSystem
@@ -233,3 +235,62 @@ Milestone 1 — the shipped numbers (deviations from §2.1 in brackets):
   swapping a loadout in the menu never compiles a shader mid-run.
 - Audio is table-driven: `SHOT_PROFILES[def.sound]` (noise layers + body blip)
   in `js/audio.js`; the rifle and shotgun rows are byte-for-byte the old sounds.
+
+Milestone 3 — `js/projectiles.js` and the GL-6 THUMPER. The shipped numbers
+(deviations from §2.1 in brackets):
+
+| id | Damage | Rate | Mag | Reserve | Reload | Flight | Blast | Sustained DPS |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `launcher` | 140 splash (head ×1.15 nominal) | 0.9/s semi | 1 | 6 / 12 | 2.8 s | 26 m/s, 6.5 m/s² drop, 1.1 s fuse | radius 4.5 m, floor 25 % | 36 (exempt, see below) |
+
+- **Pooled and allocation-free.** `ProjectileSystem` owns one `InstancedMesh` of
+  `MAX_PROJECTILES = 8` spheres and all per-round state lives in typed arrays
+  (position, velocity, fuse, damage, splash, radius, restitution, range, a
+  surface byte and two reference arrays). `spawn()` copies its arguments, so a
+  round retains nothing; `mesh.count` is 0 whenever the air is clear, so a
+  loadout without explosives does not even pay a draw call. `update()` allocates
+  nothing: module-level scratch objects for every raycast/line-of-sight query,
+  and objects are only built when a blast actually happens.
+- **Flight**: sub-stepped sweeps (`raycastBoxes()` against `level.colliders`,
+  step ≤ one radius, ≤ 12 steps/frame so a frame is never cut short), gravity
+  applied after each sweep, bounces off walls, **closed** door panels (inactive
+  = retracted, so a round flies through an open doorway) and the floor/ceiling
+  planes. `restitution: 0.35` and 70 % tangent retention: ricochets and rolls.
+- **Detonation** on fuse expiry, on touching a body (sphere vs cylinder
+  proximity, not a raycast) or on running out of `range` (range is reused as the
+  metre limit of flight). Splash falloff is `1 → 0.25` linearly from the centre
+  to the rim, and **every** splash target (enemies and the thrower) is gated by
+  `hasLineOfSight()`, so a blast does nothing through a wall.
+- **Self-damage rule**: the thrower *is* hurt by their own blast, but only at
+  `SELF_DAMAGE_MULT = 0.5` and only with an unobstructed line from the blast to
+  their chest. Firing into a wall at point blank cannot damage the shooter
+  through that wall (the roadmap's requirement); a round that cooks off in the
+  open next to them can.
+- **Visuals/audio**: one `EffectsManager.spawnExplosion(point, {radius, normal,
+  surface, owner})` next to `spawnImpact()`/`spawnBlood()` — fireball on the
+  `sparks` pool, smoke on `dust`, soot on a 12-slot scorch `DecalPool`
+  (`SCORCH_LIFETIME = 40 s`, plane size 3 m) so marks expire and die with the
+  door panel they sit on. `audio.playExplosion()` reads the new
+  `EXPLOSION_PROFILES` table next to `SHOT_PROFILES`; the launcher's own shot
+  gets a `SHOT_PROFILES.launcher` row (hollow chunk, no crack).
+- **Ammo**: `AMMO_PICKUP.launcher = 2`. The ammo-*kind* pickups of milestone 5
+  are not in yet, so the existing "refill every carried firearm" box tops the
+  thumper up by two rounds rather than being exempted from the pickup test.
+- **Balance-test exemptions** (both deliberate and documented in the suite): the
+  launcher is named in `SPLASH_DPS_EXEMPT` for the 60–160 sustained-DPS band
+  (36 dps on paper, a clump in practice) and is skipped by the shotgun-burst
+  comparison, because out-damaging one shell is the whole point of a grenade.
+  No armour exemption was needed: a body shot is `round(140 × 0.65) = 91` against
+  the 210 hp armoured infected.
+- **Schema**: `projectile` and `splash` are firearm-only fields
+  (`CATEGORY_ONLY_FIELDS`), and `validateWeaponDef()` requires
+  `projectile.speed/radius/fuse > 0`, `gravity ≥ 0`, `restitution ∈ [0,1]` and a
+  positive `splash.radius` — a projectile weapon without a blast radius is
+  rejected.
+- **Selectable with no extra work**: the def alone puts the GL-6 in the LOADOUT
+  screen's firearm selects and in `?weapons=launcher,shotgun`. Slot logic still
+  answers keys 1–5 through `loadout`, and the HUD reads `getHudData()` as for any
+  other firearm (`magazineSize: 1` empties, dry-fires and auto-reloads).
+- `headshotMultiplier: 1.15` is a **nominal** value: the schema requires > 1 for
+  every firearm, and an explosion has no aiming point — splash resolution always
+  reports `headshot: false`.

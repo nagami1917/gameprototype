@@ -5,11 +5,12 @@
  * of meshes or geometry):
  *   - ParticleSystem: one THREE.Points draw call per system. Used for
  *     blood, sparks, dust and ambient motes.
- *   - DecalPool: recycled bullet-hole and blood decals on surfaces.
+ *   - DecalPool: recycled bullet-hole, blood and explosion-scorch decals on
+ *     surfaces, each with a lifetime and an optional owner (a door panel).
  *   - Tracers: a small pool of fading line segments.
  */
 import * as THREE from 'three';
-import { createBulletHoleTexture, createBloodTexture } from './textures.js';
+import { createBulletHoleTexture, createBloodTexture, createScorchTexture } from './textures.js';
 
 const PARTICLE_VERTEX = /* glsl */ `
   attribute float size;
@@ -167,6 +168,13 @@ export class ParticleSystem {
   }
 }
 
+/* Scratch objects for spawnExplosion(): a blast must not add garbage to the
+ * frame it happens in, and nothing here outlives the call. */
+const _fireColor = new THREE.Color();
+const _smokeColor = new THREE.Color();
+const _sootGround = { x: 0, y: 0, z: 0 };
+const UP_NORMAL = { x: 0, y: 1, z: 0 };
+
 const _decalZ = new THREE.Vector3(0, 0, 1);
 const _decalN = new THREE.Vector3();
 const _decalQ = new THREE.Quaternion();
@@ -184,6 +192,10 @@ const _decalHidden = new THREE.Matrix4().makeScale(0, 0, 0);
  */
 export const HOLE_LIFETIME = 12;
 export const BLOOD_DECAL_LIFETIME = 30;
+/** Blast soot lingers far longer than a bullet hole: it is the after-action trace. */
+export const SCORCH_LIFETIME = 40;
+/** Plane size of one scorch decal at scale 1, in metres (blasts scale off it). */
+export const SCORCH_DECAL_SIZE = 3;
 export const DECAL_FADE_TIME = 0.4;
 /**
  * How far a door has to slide before its marks are culled. Deliberately tiny:
@@ -429,12 +441,19 @@ export class EffectsManager {
     this.bloodMaterial = new THREE.MeshBasicMaterial({
       map: bloodTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2,
     });
+    const scorchTex = createScorchTexture();
+    this.scorchMaterial = new THREE.MeshBasicMaterial({
+      map: scorchTex, transparent: true, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -2,
+    });
     this.holes = new DecalPool(scene, 70, this.holeMaterial, 0.22);
     this.bloodDecals = new DecalPool(scene, 24, this.bloodMaterial, 1.1);
+    // Blasts are rare (a 1-round launcher), so a dozen slots is plenty and the
+    // pool still costs one draw call.
+    this.scorch = new DecalPool(scene, 12, this.scorchMaterial, SCORCH_DECAL_SIZE, SCORCH_LIFETIME);
     this.tracers = [];
     this.tracerCursor = 0;
     this.createTracers(scene, 10);
-    this.textures = [holeTex, bloodTex];
+    this.textures = [holeTex, bloodTex, scorchTex];
   }
 
   createMotes(scene) {
@@ -529,6 +548,69 @@ export class EffectsManager {
     this.holes.place(point, normal, 0.7 + Math.random() * 0.5, Math.random() * 6.28);
   }
 
+  /**
+   * Fireball, smoke and a scorch mark for one explosion.
+   *
+   * @param {{x:number,y:number,z:number}} point  blast centre (never retained)
+   * @param {object} [opts]
+   * @param {number} [opts.radius]   splash radius in metres; scales the ball and the soot
+   * @param {{x:number,y:number,z:number}|null} [opts.normal] surface face the blast met
+   * @param {string} [opts.surface]  'concrete' | 'metal' | 'floor' | 'ceiling'
+   * @param {{openAmount:number}|null} [opts.owner] moving surface (door panel) the soot is on
+   */
+  spawnExplosion(point, { radius = 4.5, normal = null, surface = 'concrete', owner = null } = {}) {
+    const scale = radius / 4.5;
+    // Fireball: fast additive cores, gone in a blink.
+    const metal = surface === 'metal';
+    const fireballs = metal ? 34 : 26;
+    for (let i = 0; i < fireballs; i++) {
+      const speed = (5 + Math.random() * 9) * scale;
+      _fireColor.setRGB(1, 0.55 + Math.random() * 0.35, 0.08 + Math.random() * 0.2);
+      this.sparks.emit(
+        point,
+        {
+          vx: (Math.random() - 0.5) * 2 * speed,
+          vy: (Math.random() * 0.9 + 0.1) * speed,
+          vz: (Math.random() - 0.5) * 2 * speed,
+        },
+        0.22 + Math.random() * 0.34,
+        (0.2 + Math.random() * 0.3) * scale,
+        _fireColor,
+        6,
+        2.4, // drag: the ball loses speed fast instead of spraying across the room
+      );
+    }
+    // Smoke: slow, long-lived, rises as it thins out (negative gravity = lift).
+    for (let i = 0; i < (metal ? 12 : 20); i++) {
+      const g = 0.12 + Math.random() * 0.1;
+      _smokeColor.setRGB(g, g * 0.97, g * 0.94);
+      this.dust.emit(
+        point,
+        {
+          vx: (Math.random() - 0.5) * 2.4 * scale,
+          vy: 0.5 + Math.random() * 1.6,
+          vz: (Math.random() - 0.5) * 2.4 * scale,
+        },
+        0.9 + Math.random() * 0.9,
+        (0.35 + Math.random() * 0.5) * scale,
+        _smokeColor,
+        -0.35,
+        1.2,
+      );
+    }
+    // Soot: on the surface the round went off against, or on the floor when it
+    // cooked off in mid-air. Marks go through the decal pool, so they expire and
+    // die with the door panel they sit on exactly like bullet holes.
+    if (normal) {
+      this.scorch.place(point, normal, scale, Math.random() * 6.28, owner);
+    } else {
+      _sootGround.x = point.x;
+      _sootGround.y = 0;
+      _sootGround.z = point.z;
+      this.scorch.place(_sootGround, UP_NORMAL, scale, Math.random() * 6.28, null);
+    }
+  }
+
   /** Short fading tracer line from the muzzle to the impact point. */
   spawnTracer(from, to, color = 0xffd27a) {
     const t = this.tracers[this.tracerCursor];
@@ -543,10 +625,11 @@ export class EffectsManager {
     t.life = 0.07;
   }
 
-  /** Removes all bullet holes and blood pools and resets their lifetimes. */
+  /** Removes all bullet holes, blood pools and scorch marks, resetting lifetimes. */
   clearDecals() {
     this.holes.clear();
     this.bloodDecals.clear();
+    this.scorch.clear();
   }
 
   /**
@@ -563,6 +646,7 @@ export class EffectsManager {
     // Decals: expire on a timer and disappear with the surface they sit on.
     this.holes.update(dt, doors);
     this.bloodDecals.update(dt, doors);
+    this.scorch.update(dt, doors);
 
     for (const t of this.tracers) {
       if (t.life <= 0) continue;
@@ -607,8 +691,10 @@ export class EffectsManager {
     this.motes.material.dispose();
     this.holes.dispose();
     this.bloodDecals.dispose();
+    this.scorch.dispose();
     this.holeMaterial.dispose();
     this.bloodMaterial.dispose();
+    this.scorchMaterial.dispose();
     for (const t of this.textures) t.dispose();
     for (const t of this.tracers) {
       this.scene.remove(t.line);

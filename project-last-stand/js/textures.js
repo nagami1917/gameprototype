@@ -360,6 +360,36 @@ export function createBulletHoleTexture({ anisotropy = 4 } = {}) {
   return toTexture(c, { repeat: false, anisotropy, srgb: true });
 }
 
+/**
+ * Soot scorch mark for explosion decals: a dark opaque core with a soft sooty
+ * edge, plus a few radial streaks so two marks never look identical.
+ * Drawn with the same 2D calls as the blood spatter (no image data read back).
+ */
+export function createScorchTexture({ anisotropy = 4 } = {}) {
+  const size = 256;
+  const c = makeCanvas(size, size);
+  const ctx = c.getContext('2d');
+  const rand = makeRng(613);
+  ctx.clearRect(0, 0, size, size);
+  ctx.fillStyle = 'rgba(18,14,12,0.92)';
+  const core = ctx.createRadialGradient(size / 2, size / 2, 4, size / 2, size / 2, size / 2);
+  core.addColorStop(0, 'rgba(10,8,7,0.97)');
+  core.addColorStop(0.4, 'rgba(22,18,16,0.9)');
+  core.addColorStop(0.72, 'rgba(44,36,30,0.45)');
+  core.addColorStop(1, 'rgba(0,0,0,0)');
+  ctx.fillStyle = core;
+  ctx.fillRect(0, 0, size, size);
+  // Streaks radiating from the blast: longest toward the direction of travel.
+  for (let i = 0; i < 22; i++) {
+    const a = rand() * Math.PI * 2;
+    const len = 30 + rand() * 78;
+    ctx.beginPath();
+    ctx.arc(size / 2 + Math.cos(a) * len, size / 2 + Math.sin(a) * len, 3 + rand() * 12, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  return toTexture(c, { repeat: false, anisotropy });
+}
+
 /** Soft radial glow used for muzzle flashes and pickup halos. */
 export function createGlowTexture(color = '#ffffff') {
   const size = 128;

@@ -72,6 +72,13 @@ Menus can be navigated with the mouse or with &uarr; &darr; and Enter.
 - **MKR-1 Marksman**: 68 damage per semi-automatic round, x2.5 headshots, 12-round
   magazine, no distance falloff, and the round penetrates one body for 60% damage.
   Shares rifle ammunition and is the reason to keep a lane open.
+- **GL-6 Thumper**: single-shot grenade launcher. The round flies, drops, and
+  ricochets off walls and closed door panels until its fuse runs out or it touches
+  something, then explodes for 140 damage with a 4.5 m blast that falls off to 25%
+  at the rim. Cover blocks the blast entirely, for the infected and for you: firing
+  into a wall at point blank cannot hurt you through it, but a round that goes off
+  in the open next to you hurts for half. One round up the tube, 2.8 s reload, six
+  in reserve, and the LOADOUT screen lists it next to the shotgun and the marksman.
 - **Loadout**: the LOADOUT screen in the main menu picks which weapon sits in each of
   the five keys. It is saved with the settings.
 - **Field Knife**: quick, short-range single-target slash; no ammunition required.
@@ -101,13 +108,14 @@ project-last-stand/
 │   ├── game.js         state machine, systems and rules
 │   ├── player.js       movement, health, camera
 │   ├── weapon.js       weapons, hitscan, melee state machine, viewmodels
+│   ├── projectiles.js  pooled grenade flight, bounces, fuse, splash damage
 │   ├── meleeAnim.js    melee arm rig, swing poses and easing, blade trail
 │   ├── enemy.js        enemy types, states, visuals
 │   ├── enemyAI.js      perception, A* nav grid, behaviour
 │   ├── level.js        map layout, geometry, doors, lights, pickups
 │   ├── collision.js    AABB and cylinder collision, raycasts
 │   ├── waveManager.js  wave composition and flow
-│   ├── effects.js      particles, tracers, decals
+│   ├── effects.js      particles, tracers, decals, explosions
 │   ├── textures.js     procedural canvas textures
 │   ├── input.js        keyboard, mouse and pointer lock
 │   ├── ui.js           DOM menus, HUD and keyboard navigation

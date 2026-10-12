@@ -23,6 +23,7 @@ import { Enemy, warmEnemyVisuals } from './enemy.js';
 import { EnemyAI } from './enemyAI.js';
 import { WaveManager } from './waveManager.js';
 import { EffectsManager } from './effects.js';
+import { ProjectileSystem } from './projectiles.js';
 import { InputController } from './input.js';
 import { hasLineOfSight, raycastBoxes, isCircleFree } from './collision.js';
 import { sanitizeSettings, saveStorage, recordRun, DEFAULT_SETTINGS } from './storage.js';
@@ -183,11 +184,27 @@ export class Game {
       },
     });
 
+    // Explosives: one pooled flight sim. The hook block is built once and reused
+    // every frame, so the projectile update cannot add garbage to the frame.
+    this.projectileHooks = {
+      // Splash damage is reported exactly like a hitscan hit, so score, hit
+      // markers, decals and death handling stay in this one place.
+      onEnemyHit: (info) => this.onEnemyHit(info),
+      onPlayerHit: (info) => this.player.damage(info.damage, info.point),
+      onExplode: (info) => this.onProjectileExplode(info),
+    };
+    this.projectiles = new ProjectileSystem(this.scene, {
+      effects: this.effects,
+      audio: this.audio,
+      hooks: this.projectileHooks,
+    });
+
     this.weapons = new WeaponSystem({
       camera: this.camera,
       audio: this.audio,
       effects: this.effects,
       player: this.player,
+      projectiles: this.projectiles,
       loadout: this.loadout,
       hooks: {
         onShot: (def) => this.onShot(def),
@@ -278,6 +295,12 @@ export class Game {
     for (const t of this.effects.tracers) reveal(t.line);
     reveal(this.effects.holes.mesh);
     reveal(this.effects.bloodDecals.mesh);
+    // Grenade meshes and the scorch pool only appear the first time a launcher
+    // fires; the blast reuses the spark/dust pools, which must be compiled too.
+    reveal(this.projectiles.mesh);
+    reveal(this.effects.scorch.mesh);
+    reveal(this.effects.sparks.points);
+    reveal(this.effects.dust.points);
     const removeEnemies = warmEnemyVisuals(this.scene);
     try {
       this.renderer.compile(this.scene, this.camera);
@@ -487,6 +510,7 @@ export class Game {
   clearWorld() {
     for (const e of this.enemies) e.dispose();
     this.enemies.length = 0;
+    this.projectiles?.clear?.(); // no grenade outlives the run it was fired in
     this.effects.clearDecals?.();
   }
 
@@ -567,6 +591,19 @@ export class Game {
     this.audio.playEnemyDeath(enemy.position);
     this.audio.playKill(enemy.position);
     if (headshot) this.ui.toast(`HEADSHOT +${points}`, 'good');
+  }
+
+  /**
+   * A grenade went off. The blast is the loudest thing in the game: every
+   * infected nearby gets the noise, and the shockwave shakes the camera of the
+   * player who fired it (scaled by distance, capped well below a real hit).
+   */
+  onProjectileExplode({ point, radius, owner }) {
+    this.aiWorld.noise = { x: point.x, z: point.z, time: this.time };
+    if (owner !== this.player) return;
+    const d = this.player.position.distanceTo(point);
+    const close = Math.max(0, 1 - d / (radius * 3));
+    if (close > 0) this.player.addTrauma(close * 0.6);
   }
 
   onPlayerDamaged(amount, fromPos) {
@@ -763,6 +800,10 @@ export class Game {
       },
     );
 
+    // Explosives fly after the guns have fired and before the wave bookkeeping:
+    // a grenade that kills on frame N must count toward wave N in the same frame.
+    this.projectiles.update(dt, this.level.colliders, this.enemies, this.projectileHooks);
+
     // Waves and spawns.
     this.aliveCount = this.countAlive();
     this.waves.update(dt, this.aliveCount);
@@ -920,6 +961,7 @@ export class Game {
     this.input?.dispose();
     this.clearWorld();
     this.weapons?.dispose();
+    this.projectiles?.dispose();
     this.effects?.dispose();
     this.level?.dispose();
     this.audio?.dispose();
