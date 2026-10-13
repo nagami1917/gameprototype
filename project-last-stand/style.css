@@ -411,6 +411,28 @@ body {
   margin-left: 6px;
 }
 
+/* Ammo kind tag: the colour matches the stripe of the crate that feeds the gun
+   (weapon.js AMMO_KIND_INFO), so the HUD teaches which crate to run for. */
+.ammo-kind {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 10px;
+  padding: 2px 6px;
+  border: 1px solid currentColor;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  line-height: 1.2;
+  color: var(--muted);
+  opacity: 0.9;
+}
+.ammo-kind:empty { display: none; }
+.ammo-kind[data-kind="rifle"] { color: #f2c200; }
+.ammo-kind[data-kind="shell"] { color: #ff7c55; }
+.ammo-kind[data-kind="heavy"] { color: #7fbfff; }
+.ammo-kind[data-kind="explosive"] { color: #8dff95; }
+
 .weapon-status {
   min-height: 1.2em;
   font-size: 12px;

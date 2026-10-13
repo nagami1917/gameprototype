@@ -1,10 +1,11 @@
 # Weapons roadmap — more guns for PROJECT: LAST STAND
 
-Status: **milestones 0–4 landed** (schema + validation, loadouts, S-9 VIPER and
+Status: **milestones 0–5 landed** (schema + validation, loadouts, S-9 VIPER and
 MKR-1 MARKSMAN, `js/projectiles.js` + the GL-6 THUMPER, CLEAVER/SLEDGEHAMMER +
-the never-empty MK2 SIDEARM). See "Implementation notes" at the bottom for the
-numbers that were actually shipped and where they deviate from this document.
-Milestones 5–6 (ammo kinds, LMG + attachments) are still design. Covers new
+the never-empty MK2 SIDEARM, kind-aware supply crates). See "Implementation
+notes" at the bottom for the numbers that were actually shipped and where they
+deviate from this document. Milestone 6 (LMG + attachments) is still design.
+Covers new
 firearms, new melee, throwables and the systems they need. Today the game ships
 11 weapons: MX-7 rifle, HB-12 shotgun, S-9 SMG, MKR-1 marksman, GL-6 thumper,
 MK2 sidearm, field knife, steel pipe, fire axe, cleaver machete, sledgehammer
@@ -119,6 +120,10 @@ the pickup system:
   kind") and refills every carried weapon of that kind by a flat amount.
 - HUD shows reserve per kind, not just per weapon.
 
+**Landed in milestone 5.** The crate carries a kind (not "current weapon's
+kind"): the game rolls one per crate at every restock from the kinds the kit
+actually uses. The exact rules, the crate palette and the HUD read-out are in §7.
+
 ### 3.3 Loadouts
 
 `WEAPON_ORDER` is fixed at 5 slots today. Proposal:
@@ -182,7 +187,7 @@ Pure functions + tests, so balance changes cannot silently break the suite:
 | 2 | Loadouts + slot rebind | Loadout screen, storage, dynamic HUD slots | Pick 2 of 4 firearms; HUD lists what you carry; keys 1–5 still work |
 | 3 | Projectiles | `js/projectiles.js`, GL-6, scorch decals, AoE damage with LOS | Grenade launcher clears a clump; no self-damage through walls; pooled (no per-frame allocation) |
 | 4 | Melee + pistol (**landed**) | Machete, sledge, always-available pistol | New swing poses; stagger works; pistol refills each intermission |
-| 5 | Ammo kinds + pickups | Kind-aware `PickupSystem`, HUD | Ammo boxes state their kind; LMG ammo is rarer than rifle ammo |
+| 5 | Ammo kinds + pickups (**landed**) | Kind-aware `PickupSystem`, HUD | Ammo boxes state their kind; LMG ammo is rarer than rifle ammo |
 | 6 | LMG + attachments (stretch) | BZ-40, upgrade bench, attachments on `WeaponState` | Bench usable in intermission; attachments persist for the run |
 
 Ordering matters: **0 → 1 → 2** are low-risk and shippable on their own; **3**
@@ -203,7 +208,7 @@ is the largest single chunk of new code and should land before the mode work in
 
 ---
 
-## 7. Implementation notes (milestones 0–2, shipped)
+## 7. Implementation notes (milestones 0–5, shipped)
 
 Milestone 0 — `js/weapon.js` exports `validateWeaponDef(def, allDefs?, loadout?)`,
 `validateWeaponDefs()`, `SLOT_COUNT`, `SLOT_CATEGORIES`, `DEFAULT_LOADOUT`,
@@ -233,8 +238,9 @@ Milestone 1 — the shipped numbers (deviations from §2.1 in brackets):
 - The DMR has `falloff: null` (the document implies no distance loss), range 200
   and `penetration: 1`; penetrated bodies take `PENETRATION_DAMAGE_MULT` (0.6)
   of the damage, compounding, and the wall behind them still takes the decal.
-- Both use `ammoKind: 'rifle'` while the ammo-kind *pickups* of milestone 5 do
-  not exist yet; `AMMO_PICKUP` has `smg: 90`, `dmr: 24`.
+- Both use `ammoKind: 'rifle'`, so since milestone 5 a rifle crate tops up a
+  rifle *and* a Viper/Marksman in the same kit; `AMMO_PICKUP` has `smg: 90`,
+  `dmr: 24`.
 - Viewmodels come from `buildParametricFirearm(spec)` (receiver/barrel/magazine/
   stock/grip/rail/sight primitives, merged per material). Every viewmodel is
   built once per `WeaponSystem` and `prewarmShaders()` compiles all of them, so
@@ -279,9 +285,8 @@ Milestone 3 — `js/projectiles.js` and the GL-6 THUMPER. The shipped numbers
   door panel they sit on. `audio.playExplosion()` reads the new
   `EXPLOSION_PROFILES` table next to `SHOT_PROFILES`; the launcher's own shot
   gets a `SHOT_PROFILES.launcher` row (hollow chunk, no crack).
-- **Ammo**: `AMMO_PICKUP.launcher = 2`. The ammo-*kind* pickups of milestone 5
-  are not in yet, so the existing "refill every carried firearm" box tops the
-  thumper up by two rounds rather than being exempted from the pickup test.
+- **Ammo**: `AMMO_PICKUP.launcher = 2`, from **explosive** crates only since
+  milestone 5 — the rarest roll in the crate lottery (see the milestone 5 notes).
 - **Balance-test exemptions** (both deliberate and documented in the suite): the
   launcher is named in `SPLASH_DPS_EXEMPT` for the 60–160 sustained-DPS band
   (36 dps on paper, a clump in practice) and is skipped by the shotgun-burst
@@ -380,8 +385,60 @@ from §2.1/§2.2 in brackets):
   present. Nothing else about the schema changed, and `ammoKind: 'rifle'` on the
   pistol is only there because the schema requires one — the pickup system still
   ignores the sidearm entirely.
-- **Not landed yet**: milestone 5's kind-aware pickups. `addAmmo()` is still
-  "refill every carried firearm by its own `AMMO_PICKUP` amount", which is why the
-  pistol needed the by-name pickup exemption above. When milestone 5 lands, the
-  exemption stays: the sidearm should refill from no crate, whatever the crates
-  carry.
+- Milestone 5's kind-aware crates kept the exemption: `crateFeeds()` rejects the
+  sidearm by name before it looks at the kind, so the sidearm refills from no
+  crate, whatever the crates carry, and `carriedAmmoKinds()` does not count it —
+  a shotgun + launcher kit sees no rifle crates just because the pistol
+  nominally fires rifle rounds.
+
+Milestone 5 — ammo kinds and kind-aware supply crates (roadmap §3.2). Pools are
+still **per weapon**; what changed is which crate feeds which gun:
+
+| kind | label | crate stripe | lottery weight | fed by it today |
+| --- | --- | --- | --- | --- |
+| `rifle` | RIFLE | yellow `0xf2c200` | 6 | MX-7, S-9, MKR-1 |
+| `shell` | SHELL | red `0xe24a2a` | 3 | HB-12 |
+| `heavy` | HEAVY | blue `0x4a9cf2` | 2 | nothing yet (BZ-40, milestone 6) |
+| `explosive` | EXPLOSIVE | green `0x52d65c` | 1 | GL-6 |
+
+- **A crate carries a kind, and the kit decides the kinds.** `AMMO_KIND_INFO` in
+  `js/weapon.js` is the table above. `carriedAmmoKinds(loadout)` lists the kinds
+  of the crate-fed firearms in the kit (the sidearm excluded), and
+  `assignCrateKinds(count, kinds, rng)` rolls one kind per crate: only carried
+  kinds (a crate is never useless to the kit it was restocked for), **every
+  carried kind at least once** while there are crates to spare (a shotgun player
+  always finds shells somewhere), the rest drawn by `weight`, then shuffled so the
+  guaranteed crates move around. The facility has three `A` cells and a kit has at
+  most two kinds, so the guarantee always holds. An empty kind list falls back to
+  rifle crates. `Game.restockSupplies()` runs the roll at `startRun()` and on
+  `waveCleared` — the frame the intermission starts — so the crates are re-rolled
+  every break rather than once per run. The loadout screen is menu-only, so a
+  crate's kind cannot go stale against the kit mid-run.
+- **"Ammo boxes state their kind"**: `PickupSystem` keeps one stripe material and
+  one glow sprite material per kind (built from the palette `Level` receives as
+  `opts.ammoKinds`; `level.js` cannot import `weapon.js`, which imports it) and
+  `setAmmoKinds()` swaps a crate's materials rather than cloning them, so a
+  restock allocates nothing. The HUD prints the drawn gun's kind next to the
+  reserve (`#hud-ammo-kind`, from `getHudData().ammoKind/ammoKindLabel`) in the
+  crate's colour (`style.css .ammo-kind[data-kind]`), and the pickup toast is
+  `SHELL AMMO RESTOCKED` rather than `AMMO RESTOCKED`.
+- **Collect rule**: `tryCollect()` now passes `(type, kind)` to the filter and
+  `Game.updatePickups()` asks `weapons.needsAmmo(kind)`, so a crate is collectable
+  only when a crate-fed firearm **of that kind** has room — a dry shotgun no longer
+  swallows a rifle crate, and a full rifle leaves the rifle crate on the floor for
+  later. `addAmmo(kind)` refills every crate-fed firearm of that kind by its own
+  `AMMO_PICKUP` amount (a rifle crate gives a rifle + SMG kit 45 + 90). Both keep
+  their untyped form (`needsAmmo()`/`addAmmo()` = any kind) for callers that do
+  not care. `reservesByKind()` is the "reserve per kind" read-out the document
+  asked for — a sum over the kit's pools, available to the HUD but not yet drawn
+  as a second line.
+- **"LMG ammo is rarer than rifle ammo"** is pinned in the suite as the weight
+  ordering `rifle > shell > heavy > explosive`, plus a 600-crate roll in which
+  rifle crates outnumber explosive ones better than 3:1. The `heavy` row exists
+  today only so milestone 6's BZ-40 inherits its rarity by setting
+  `ammoKind: 'heavy'`; no crate rolls it until a kit carries such a gun.
+- **Not changed**: per-weapon `reserve`/`maxReserve`, `AMMO_PICKUP` amounts, the
+  health pack, `refillAlwaysCarried()` and the `AMMO_PICKUP` schema test. The
+  roadmap's alternative — a crate that takes the *held* weapon's kind — was not
+  used, because a crate whose colour changes with the gun in your hand cannot
+  "state its kind".

@@ -438,10 +438,27 @@ function placeMatrix(x, y, z, rotY = 0) {
 }
 
 /* ------------------------------------------------------------------ *
- * Pickups: health packs and ammo boxes that respawn during supply breaks.
+ * Pickups: health packs and ammo crates that respawn during supply breaks.
+ *
+ * Every ammo crate carries an ammo *kind* (milestone 5): the game rolls one per
+ * crate at each restock (weapon.js assignCrateKinds()) and the crate shows it
+ * with its stripe and glow colour. The palette comes in through the
+ * constructor, because weapon.js imports this module and must not be imported
+ * back; `DEFAULT_CRATE_STYLE` is only the look of a kind the palette lacks.
  * ------------------------------------------------------------------ */
+const DEFAULT_AMMO_KIND = 'rifle';
+const DEFAULT_CRATE_STYLE = Object.freeze({ color: 0xf2c200, glow: 0xffd34d });
+
 export class PickupSystem {
-  constructor(scene, healthSpots, ammoSpots, glowTexture) {
+  /**
+   * @param {THREE.Scene} scene
+   * @param {{x:number,z:number}[]} healthSpots
+   * @param {{x:number,z:number}[]} ammoSpots
+   * @param {THREE.Texture|null} glowTexture
+   * @param {{ ammoKinds?: Record<string, {color:number, glow:number}> }} [opts]
+   *   `ammoKinds` is the per-kind crate palette (weapon.js AMMO_KIND_INFO)
+   */
+  constructor(scene, healthSpots, ammoSpots, glowTexture, { ammoKinds = {} } = {}) {
     this.scene = scene;
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -460,24 +477,43 @@ export class PickupSystem {
     ]).geometry, crossMat);
     healthGroup.add(base, cross);
 
+    // One stripe material and one glow material per ammo kind; a crate swaps
+    // between them when its kind changes, so a restock allocates nothing.
+    this.glowTexture = glowTexture;
+    this.crateStyles = new Map();
+    const styleFor = (kind) => {
+      if (!this.crateStyles.has(kind)) {
+        const palette = ammoKinds[kind] ?? DEFAULT_CRATE_STYLE;
+        this.crateStyles.set(kind, {
+          stripe: new THREE.MeshStandardMaterial({
+            color: palette.color, roughness: 0.5, emissive: palette.color, emissiveIntensity: 0.18,
+          }),
+          glow: new THREE.SpriteMaterial({
+            map: glowTexture, color: palette.glow, transparent: true, depthWrite: false,
+            blending: THREE.AdditiveBlending, opacity: 0.7,
+          }),
+        });
+      }
+      return this.crateStyles.get(kind);
+    };
+    for (const kind of Object.keys(ammoKinds)) styleFor(kind);
+    this.crateStyleFor = (kind) => styleFor(ammoKinds[kind] ? kind : DEFAULT_AMMO_KIND);
+
     const ammoGroup = new THREE.Group();
     const crate = new THREE.Mesh(
       new THREE.BoxGeometry(0.56, 0.32, 0.42),
       new THREE.MeshStandardMaterial({ color: 0x4f5e2c, roughness: 0.7, metalness: 0.3 }),
     );
-    const stripe = new THREE.Mesh(
-      new THREE.BoxGeometry(0.58, 0.05, 0.44),
-      new THREE.MeshStandardMaterial({ color: 0xf2c200, roughness: 0.5, emissive: 0x332200 }),
-    );
+    const stripe = new THREE.Mesh(new THREE.BoxGeometry(0.58, 0.05, 0.44), this.crateStyleFor(DEFAULT_AMMO_KIND).stripe);
+    stripe.name = 'stripe';
     stripe.position.y = 0.0;
     ammoGroup.add(crate, stripe);
 
     this.healthTemplate = healthGroup;
     this.ammoTemplate = ammoGroup;
-    this.glowTexture = glowTexture;
     this.glowMaterials = {
       health: new THREE.SpriteMaterial({ map: glowTexture, color: 0x66ff99, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.7 }),
-      ammo: new THREE.SpriteMaterial({ map: glowTexture, color: 0xffd34d, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.7 }),
+      ammo: this.crateStyleFor(DEFAULT_AMMO_KIND).glow,
     };
 
     for (const spot of healthSpots) this.addItem('health', spot);
@@ -494,7 +530,54 @@ export class PickupSystem {
     glow.position.set(0, 0.2, 0);
     mesh.add(glow);
     this.group.add(mesh);
-    this.items.push({ type, x: spot.x, z: spot.z, mesh, active: true, phase: Math.random() * 6 });
+    const item = { type, x: spot.x, z: spot.z, mesh, active: true, phase: Math.random() * 6, kind: null };
+    if (type === 'ammo') {
+      item.kind = DEFAULT_AMMO_KIND;
+      item.stripe = mesh.getObjectByName('stripe');
+      item.glow = glow;
+    }
+    this.items.push(item);
+  }
+
+  /** The ammo crates, in layout order - the order `setAmmoKinds()` fills. */
+  get ammoItems() {
+    return this.items.filter((item) => item.type === 'ammo');
+  }
+
+  /** How many ammo crates the level has (what assignCrateKinds() must roll for). */
+  get ammoCount() {
+    let n = 0;
+    for (const item of this.items) if (item.type === 'ammo') n++;
+    return n;
+  }
+
+  /**
+   * Gives the i-th ammo crate the i-th kind and repaints it. A short list
+   * repeats its last entry; an empty one leaves every crate as it is.
+   * @param {string[]} kinds
+   */
+  setAmmoKinds(kinds) {
+    if (!Array.isArray(kinds) || kinds.length === 0) return;
+    let i = 0;
+    for (const item of this.items) {
+      if (item.type !== 'ammo') continue;
+      const kind = kinds[Math.min(i++, kinds.length - 1)];
+      if (item.kind === kind) continue;
+      item.kind = kind;
+      const style = this.crateStyleFor(kind);
+      if (item.stripe) item.stripe.material = style.stripe;
+      if (item.glow) item.glow.material = style.glow;
+    }
+  }
+
+  /**
+   * Supply break: every spot is available again and the ammo crates take the
+   * kinds in `kinds` (see setAmmoKinds()); omit it to keep their current kinds.
+   * @param {string[]} [kinds]
+   */
+  restock(kinds) {
+    if (kinds) this.setAmmoKinds(kinds);
+    this.setAllActive(true);
   }
 
   /** Makes every pickup spot available again (supply break). */
@@ -506,14 +589,15 @@ export class PickupSystem {
   }
 
   /**
-   * Returns the first active pickup within `radius` that `accept(type)` allows,
-   * and deactivates it. Returns null if nothing is collected.
+   * Returns the first active pickup within `radius` that `accept(type, kind)`
+   * allows (`kind` is the ammo kind of a crate, null for a health pack), and
+   * deactivates it. Returns null if nothing is collected.
    */
   tryCollect(x, z, radius, accept) {
     for (const item of this.items) {
       if (!item.active) continue;
       if (Math.hypot(item.x - x, item.z - z) > radius) continue;
-      if (!accept(item.type)) continue;
+      if (!accept(item.type, item.kind)) continue;
       item.active = false;
       item.mesh.visible = false;
       return item;
@@ -537,7 +621,10 @@ export class PickupSystem {
     this.healthTemplate.traverse((o) => o.material && o.material.dispose());
     this.ammoTemplate.traverse((o) => o.material && o.material.dispose());
     this.glowMaterials.health.dispose();
-    this.glowMaterials.ammo.dispose();
+    for (const style of this.crateStyles.values()) {
+      style.stripe.dispose();
+      style.glow.dispose();
+    }
   }
 }
 
@@ -550,8 +637,10 @@ export class Level {
    * @param {object} opts
    * @param {THREE.WebGLRenderer} [opts.renderer]  used for anisotropy
    * @param {string[]} [opts.rows]  layout override (defaults to LAYOUT)
+   * @param {Record<string, {color:number, glow:number}>} [opts.ammoKinds]
+   *   crate palette per ammo kind, forwarded to PickupSystem (weapon.js AMMO_KIND_INFO)
    */
-  constructor(scene, { renderer = null, rows = LAYOUT } = {}) {
+  constructor(scene, { renderer = null, rows = LAYOUT, ammoKinds = {} } = {}) {
     this.scene = scene;
     this.group = new THREE.Group();
     scene.add(this.group);
@@ -587,7 +676,7 @@ export class Level {
     this.buildSigns(anisotropy);
 
     this.glowTexture = this.track(createGlowTexture('#ffffff'));
-    this.pickups = new PickupSystem(scene, this.plan.healthSpots, this.plan.ammoSpots, this.glowTexture);
+    this.pickups = new PickupSystem(scene, this.plan.healthSpots, this.plan.ammoSpots, this.glowTexture, { ammoKinds });
     this.dust = null;
   }
 

@@ -385,6 +385,93 @@ export const AMMO_PICKUP = {
   launcher: 2, // explosive rounds are the rarest thing in the facility
 };
 
+/**
+ * What each ammo kind is called and looks like, and how often a supply crate
+ * rolls it (docs/Weapons_Roadmap.md §3.2, milestone 5).
+ *
+ * - `label`  is printed on the HUD next to the reserve and in the pickup toast.
+ * - `color`  is the crate's stripe, `glow` its sprite - the HUD tag uses the same
+ *   colour (style.css `.ammo-kind[data-kind]`), so "red crate" reads as "shells"
+ *   without a label in the world.
+ * - `weight` is the crate lottery: `assignCrateKinds()` fills the spare crates in
+ *   proportion to it, which is how "LMG ammo is rarer than rifle ammo" is kept
+ *   true for whatever heavy weapon arrives in milestone 6. Rifle rounds are the
+ *   common kind; explosive rounds are the rarest thing in the facility.
+ */
+export const AMMO_KIND_INFO = Object.freeze({
+  rifle: Object.freeze({ label: 'RIFLE', weight: 6, color: 0xf2c200, glow: 0xffd34d }),
+  shell: Object.freeze({ label: 'SHELL', weight: 3, color: 0xe24a2a, glow: 0xff7c55 }),
+  heavy: Object.freeze({ label: 'HEAVY', weight: 2, color: 0x4a9cf2, glow: 0x7fbfff }),
+  explosive: Object.freeze({ label: 'EXPLOSIVE', weight: 1, color: 0x52d65c, glow: 0x8dff95 }),
+});
+
+/**
+ * The ammo kinds a loadout can actually use from a crate, in `AMMO_KINDS`
+ * order and without duplicates. Melee carries none, and the always-carried
+ * sidearm is left out on purpose: it never takes crates, so a kind that only it
+ * would use must not put crates on the floor that refill nothing.
+ *
+ * @param {string[]} [loadout]  weapon id per loadout key
+ * @returns {string[]}          e.g. `['rifle', 'shell']` for the default kit
+ */
+export function carriedAmmoKinds(loadout = DEFAULT_LOADOUT) {
+  const kinds = new Set();
+  for (const id of slotIds(loadout)) {
+    const def = WEAPON_DEFS[id];
+    if (!def || def.category !== 'firearm' || ALWAYS_CARRIED.includes(id)) continue;
+    if (def.ammoKind) kinds.add(def.ammoKind);
+  }
+  return AMMO_KINDS.filter((kind) => kinds.has(kind));
+}
+
+/**
+ * Rolls a kind for each of `count` supply crates (milestone 5, roadmap §3.2).
+ *
+ * Rules, in order:
+ * 1. Only kinds in `kinds` are rolled - a crate is never useless to the kit it
+ *    was restocked for. An empty list falls back to rifle crates, which is also
+ *    what the sidearm nominally shoots.
+ * 2. Every kind appears at least once while there are crates to spare, so a
+ *    shotgun player always finds shells *somewhere* in the facility.
+ * 3. The remaining crates are drawn by `AMMO_KIND_INFO[kind].weight`, so the
+ *    common kind is common and explosive crates are a find.
+ * 4. The result is shuffled, so the guaranteed crates are not always the same
+ *    spots.
+ *
+ * Pure; `rng` defaults to `Math.random` and the suite passes a seeded one, so
+ * the roll is reproducible.
+ *
+ * @param {number} count         ammo crates in the level
+ * @param {string[]} kinds       kinds the loadout uses (see carriedAmmoKinds())
+ * @param {() => number} [rng]   uniform [0, 1)
+ * @returns {string[]}           one kind per crate
+ */
+export function assignCrateKinds(count, kinds, rng = Math.random) {
+  const pool = AMMO_KINDS.filter((kind) => Array.isArray(kinds) && kinds.includes(kind));
+  if (pool.length === 0) pool.push('rifle');
+  const total = Math.max(0, Math.floor(count) || 0);
+  const out = [];
+  for (let i = 0; i < Math.min(total, pool.length); i++) out.push(pool[i]);
+  const weightSum = pool.reduce((sum, kind) => sum + AMMO_KIND_INFO[kind].weight, 0);
+  while (out.length < total) {
+    let roll = rng() * weightSum;
+    let pick = pool[pool.length - 1];
+    for (const kind of pool) {
+      roll -= AMMO_KIND_INFO[kind].weight;
+      if (roll < 0) { pick = kind; break; }
+    }
+    out.push(pick);
+  }
+  // Fisher-Yates, so rule 2's crates land anywhere.
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const tmp = out[i];
+    out[i] = out[j];
+    out[j] = tmp;
+  }
+  return out;
+}
+
 /** Every weapon that can be picked in a loadout, in catalogue order. */
 export const WEAPON_IDS = Object.freeze(Object.keys(WEAPON_DEFS));
 
@@ -1366,16 +1453,27 @@ export class WeaponSystem {
   }
 
   /**
-   * True when a *pickup-fed* firearm has room for reserve ammo. Melee is
-   * inexhaustible, and the always-carried sidearm is ignored: it refills itself
-   * at every intermission (refillAlwaysCarried()), so a dry pistol must not make
-   * an ammo crate look collectable while the crate refills nothing.
+   * True for a slot that a supply crate of `kind` feeds: a pickup-fed firearm
+   * of that ammo kind (any kind when `kind` is null). Melee is inexhaustible,
+   * and the always-carried sidearm is never crate-fed: it refills itself at
+   * every intermission (refillAlwaysCarried()), whatever kind the crate carries.
    */
-  needsAmmo() {
-    return this.states.some((st) =>
-      st.def.category === 'firearm' &&
+  crateFeeds(st, kind = null) {
+    return st.def.category === 'firearm' &&
       !ALWAYS_CARRIED.includes(st.def.id) &&
-      st.reserve < st.def.maxReserve);
+      (kind == null || st.def.ammoKind === kind);
+  }
+
+  /**
+   * True when a crate-fed firearm of `kind` has room for reserve ammo (any kind
+   * when `kind` is omitted). A dry sidearm never makes a crate look collectable
+   * while the crate would refill nothing, and - since milestone 5 - neither does
+   * a dry shotgun standing next to a rifle crate.
+   *
+   * @param {string|null} [kind]  ammo kind the crate carries
+   */
+  needsAmmo(kind = null) {
+    return this.states.some((st) => this.crateFeeds(st, kind) && st.reserve < st.def.maxReserve);
   }
 
   /** Shows or hides the viewmodel (hidden in menus and after death). */
@@ -1409,15 +1507,17 @@ export class WeaponSystem {
   }
 
   /**
-   * Adds reserve ammo for every weapon (ammo pickups).
+   * A supply crate: adds `AMMO_PICKUP` reserve to every crate-fed firearm of
+   * `kind` (every crate-fed firearm when `kind` is omitted). A rifle crate tops
+   * up a rifle *and* an SMG in the same kit; it leaves the shotgun alone.
+   *
+   * @param {string|null} [kind]  ammo kind the crate carries
    * @returns {boolean} true when at least one weapon accepted ammo
    */
-  addAmmo() {
+  addAmmo(kind = null) {
     let added = false;
     for (const st of this.states) {
-      if (st.def.category !== 'firearm') continue;
-      // The sidearm is fed by the intermission refill, never by a crate.
-      if (ALWAYS_CARRIED.includes(st.def.id)) continue;
+      if (!this.crateFeeds(st, kind)) continue;
       // A weapon without a pickup value simply keeps its reserve (every firearm
       // has one today - the schema test enforces it).
       const amount = AMMO_PICKUP[st.def.id];
@@ -1427,6 +1527,23 @@ export class WeaponSystem {
       if (st.reserve > before) added = true;
     }
     return added;
+  }
+
+  /**
+   * Reserve rounds per ammo kind across the whole kit (roadmap §3.2: "HUD shows
+   * reserve per kind"), crate-fed weapons only. Pools are still per weapon -
+   * this is a read-out, not a shared magazine - so a rifle + SMG kit reports
+   * their two reserves added together under `rifle`.
+   *
+   * @returns {Record<string, number>}  kind -> rounds, only kinds the kit carries
+   */
+  reservesByKind() {
+    const out = {};
+    for (const st of this.states) {
+      if (!this.crateFeeds(st)) continue;
+      out[st.def.ammoKind] = (out[st.def.ammoKind] ?? 0) + st.reserve;
+    }
+    return out;
   }
 
   /**
@@ -2004,11 +2121,15 @@ export class WeaponSystem {
   getHudData() {
     const st = this.state;
     const hasAmmo = st.def.category === 'firearm';
+    const ammoKind = hasAmmo ? st.def.ammoKind : null;
     return {
       name: st.def.name,
       ammo: st.ammo,
       reserve: st.reserve,
       hasAmmo,
+      // Which crate feeds this gun; the HUD prints the label in the kind's colour.
+      ammoKind,
+      ammoKindLabel: ammoKind ? AMMO_KIND_INFO[ammoKind]?.label ?? ammoKind.toUpperCase() : '',
       melee: !hasAmmo,
       attacking: st.attacking,
       reloading: st.reloading,

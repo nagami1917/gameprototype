@@ -18,7 +18,10 @@
 import * as THREE from 'three';
 import { Level } from './level.js';
 import { Player } from './player.js';
-import { WeaponSystem, sanitizeLoadout, hudSlotLabels, loadoutSlotOptions } from './weapon.js';
+import {
+  WeaponSystem, sanitizeLoadout, hudSlotLabels, loadoutSlotOptions,
+  AMMO_KIND_INFO, carriedAmmoKinds, assignCrateKinds,
+} from './weapon.js';
 import { Enemy, warmEnemyVisuals } from './enemy.js';
 import { EnemyAI } from './enemyAI.js';
 import { WaveManager } from './waveManager.js';
@@ -170,7 +173,8 @@ export class Game {
     this.flashlightSpill.target = this.flashlight.target;
     this.camera.add(this.flashlightSpill);
 
-    this.level = new Level(this.scene, { renderer: this.renderer });
+    // The crate palette rides along so an ammo crate can show its kind.
+    this.level = new Level(this.scene, { renderer: this.renderer, ammoKinds: AMMO_KIND_INFO });
     this.effects = new EffectsManager(this.scene, { bounds: this.level.bounds });
     this.effects.setViewport(window.innerHeight * this.renderer.getPixelRatio(), this.camera.fov);
 
@@ -328,7 +332,7 @@ export class Game {
     this.gameOverShown = false;
     this.resetPlayerToStart();
     this.weapons.reset();
-    this.level.pickups.setAllActive(true);
+    this.restockSupplies();
     this.effects.clearDecals?.();
     this.waves.start();
     this.setState(STATE.PLAYING);
@@ -677,7 +681,7 @@ export class Game {
         this.ui.setCountdown('');
         this.ui.showBanner('WAVE CLEARED', `+${p.bonus} bonus. Restock before the next wave.`, 'good');
         this.audio.playWaveClear();
-        this.level.pickups.setAllActive(true);
+        this.restockSupplies();
         this.ui.toast('Supply crates restocked', 'good');
         // The MK2 SIDEARM is the "never empty" weapon: it tops itself back up to
         // 36 rounds here, at the frame the intermission starts, instead of taking
@@ -692,17 +696,32 @@ export class Game {
     }
   }
 
+  /**
+   * Supply break: every pickup spot is available again and each ammo crate
+   * rolls the kind it carries - only kinds the current kit can use, every one of
+   * them at least once, the rest by rarity (weapon.js assignCrateKinds()). Rolled
+   * per restock rather than once per run, so the crate at the end of the hall is
+   * not the same crate every intermission.
+   */
+  restockSupplies() {
+    const pickups = this.level.pickups;
+    pickups.restock(assignCrateKinds(pickups.ammoCount, carriedAmmoKinds(this.loadout)));
+  }
+
   updatePickups() {
     const p = this.player.position;
-    const item = this.level.pickups.tryCollect(p.x, p.z, PICKUP_RADIUS, (type) =>
-      type === 'health' ? this.player.health < this.player.maxHealth : this.weapons.needsAmmo());
+    // A crate is only collectable when a carried weapon of its kind has room,
+    // so a dry shotgun does not swallow a rifle crate (and vice versa).
+    const item = this.level.pickups.tryCollect(p.x, p.z, PICKUP_RADIUS, (type, kind) =>
+      type === 'health' ? this.player.health < this.player.maxHealth : this.weapons.needsAmmo(kind));
     if (!item) return;
     if (item.type === 'health') {
       const healed = this.player.heal(HEALTH_PACK);
       this.ui.toast(`+${healed} HEALTH`, 'good');
     } else {
-      this.weapons.addAmmo();
-      this.ui.toast('AMMO RESTOCKED', 'good');
+      this.weapons.addAmmo(item.kind);
+      const label = AMMO_KIND_INFO[item.kind]?.label ?? 'AMMO';
+      this.ui.toast(`${label} AMMO RESTOCKED`, 'good');
     }
     this.audio.playPickup(item.type);
   }
