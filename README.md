@@ -28,3 +28,7 @@ Game prototypes.
 - **Flashlight**: wider, softer and far-reaching beam (54° cone, 45 m reach,
   flatter falloff) plus a dim short-range spill so the area around the player is
   lit; shadow map raised to 2048 to keep the wider cone crisp.
+
+
+##
+
